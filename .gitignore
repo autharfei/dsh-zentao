@@ -1,0 +1,47 @@
+# Generated output and dependencies
+/node_modules/
+/lib/
+/dist/
+/coverage/
+/.nyc_output/
+*.tgz
+*.zip
+
+# User configuration, credentials, and runtime data
+.env
+.env.*
+!.env.example
+**/connection.json
+**/state.json
+**/credentials*.json
+**/secrets*.json
+*.pem
+*.key
+*.p12
+*.pfx
+**/.dsh/
+**/mcp/
+**/storages/
+
+# Local investigation, test output, and internal development records
+/.probe/
+/.test-data/
+/.worktrees/
+/worktrees/
+/test-results/
+/playwright-report/
+/reports/
+zentao-skin-paint-*.png
+/logs/
+*.log
+*.tmp
+*.bak
+/docs/superpowers/
+/docs/progress*.md
+/docs/verification.md
+
+# Editor and operating-system files
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
