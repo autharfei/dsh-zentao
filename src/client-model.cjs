@@ -39,10 +39,38 @@ function summarize(data = {}) {
   return { tasks: tasks.length, bugs: bugs.length, urgent: [...tasks, ...bugs].filter(item => Number(item.pri) === 1).length, unread: list(data.notifications).filter(notice => !notice.read).length };
 }
 
+function petAlertsDraft(alerts = {}) {
+  return Object.fromEntries(['task', 'bug'].map(kind => {
+    const profile = alerts?.[kind] || {};
+    return [kind, { animation: text(profile.animation), imageType: profile.imageType ?? 'none', image: text(profile.image) }];
+  }));
+}
+
+function safePetImageUrl(candidate) {
+  try {
+    const url = new URL(text(candidate).trim());
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.hash || url.href.includes('#')) return null;
+    return url.href;
+  } catch { return null; }
+}
+
 function settingsPatch(settings = {}) {
   const pollSeconds = Number(settings.pollSeconds);
   if (!Number.isInteger(pollSeconds) || pollSeconds < 30 || pollSeconds > 60) throw new Error('轮询间隔须为 30～60 秒之间的整数');
-  return { pollSeconds, notificationsEnabled: settings.notificationsEnabled !== false, petEnabled: settings.petEnabled !== false, petId: text(settings.petId).trim() };
+  const petDurationSeconds = Number(settings.petDurationSeconds ?? 10);
+  if (!Number.isInteger(petDurationSeconds) || petDurationSeconds < 5 || petDurationSeconds > 120) throw new Error('气泡显示时长须为 5～120 秒之间的整数');
+  const petAlerts = petAlertsDraft(settings.petAlerts);
+  for (const [kind, profile] of Object.entries(petAlerts)) {
+    const title = kind === 'bug' ? 'Bug' : '任务';
+    profile.animation = profile.animation.trim();
+    profile.image = profile.image.trim();
+    if (!['none', 'meme', 'upload', 'url'].includes(profile.imageType)) throw new Error(`${title}提醒的图片模式无效`);
+    if (profile.imageType === 'none') profile.image = '';
+    else if (!profile.image) throw new Error(`请为${title}提醒选择图片、上传图片或填写图片网址`);
+    else if (profile.imageType === 'upload' && !/^[a-f\d]{64}$/i.test(profile.image)) throw new Error(`${title}提醒的上传图片无效，请重新上传`);
+    else if (profile.imageType === 'url' && !safePetImageUrl(profile.image)) throw new Error(`${title}图片网址须为 HTTP 或 HTTPS，且不含用户名、密码或片段（#）`);
+  }
+  return { pollSeconds, notificationsEnabled: settings.notificationsEnabled !== false, petEnabled: settings.petEnabled !== false, petId: text(settings.petId).trim(), petDurationSeconds, petAlerts };
 }
 
 function connectionPatch(draft = {}, saved = {}) {
@@ -194,7 +222,8 @@ function createApi({ fetchImpl = (...args) => fetch(...args), timeoutMs = 20000 
     settings: options => request('/settings', options),
     saveSettings: (body, options) => request('/settings', { ...options, body: settingsPatch(body) }),
     pets: options => request('/pets', options),
-    petTest: options => request('/pet-test', { ...options, body: {} }),
+    uploadPetImage: (body, options) => request('/pet-image', { ...options, body: { data: text(body?.data) } }),
+    petTest: (options = {}) => request('/pet-test', { ...options, body: { kind: options.kind || 'task' } }),
   };
 }
 
@@ -246,4 +275,4 @@ function createOverviewStore({ api = createApi(), setTimeout: later = setTimeout
   };
 }
 
-module.exports = { STATUS_LABELS, NOTICE_LABELS, TASK_STATUSES, BUG_STATUSES, filterItems, paginateItems, summarize, settingsPatch, connectionPatch, extractImageId, safeSiteUrl, escapeHtml, buildSafeDocument, createApi, createOverviewStore };
+module.exports = { STATUS_LABELS, NOTICE_LABELS, TASK_STATUSES, BUG_STATUSES, filterItems, paginateItems, summarize, petAlertsDraft, safePetImageUrl, settingsPatch, connectionPatch, extractImageId, safeSiteUrl, escapeHtml, buildSafeDocument, createApi, createOverviewStore };

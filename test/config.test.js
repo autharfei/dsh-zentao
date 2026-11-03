@@ -22,5 +22,5 @@ test('public configuration contains no secret even when private config has extra
   const result = publicSettings({ pollSeconds: 45, petEnabled: true, notificationsEnabled: true, petId: '', password: 'never-visible', token: 'never-visible' }, 'C:/connection.json', true);
   assert.equal(result.hasCredentials, true);
   assert.ok(!JSON.stringify(result).includes('never-visible'));
-  assert.deepEqual(Object.keys(result).sort(), ['connectionFile', 'hasCredentials', 'notificationsEnabled', 'petEnabled', 'petId', 'pollSeconds'].sort());
+  assert.deepEqual(Object.keys(result).sort(), ['connectionFile', 'hasCredentials', 'notificationsEnabled', 'petEnabled', 'petId', 'petAlerts', 'petDurationSeconds', 'pollSeconds'].sort());
 });

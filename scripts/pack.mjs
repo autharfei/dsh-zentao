@@ -19,7 +19,7 @@ export async function pack() {
   // Distribute only these known artifacts; never discover files in a user's
   // storage, MCP configuration, or extra files left in the build directory.
   const files = ['package.json', 'cordis.patch.yml', 'icon.svg', 'README.md', 'LICENSE',
-    ...['client.js', 'config.js', 'http.js', 'index.js', 'pet.js', 'runtime.js', 'store.js', 'sync.js', 'zentao.js'].map(name => `lib/${name}`)];
+    ...['alert-images.js', 'client.js', 'config.js', 'http.js', 'index.js', 'pet.js', 'runtime.js', 'store.js', 'sync.js', 'zentao.js'].map(name => `lib/${name}`)];
   const entries = [];
   for (const name of files) entries.push(tarEntry(`package/${name}`, await readFile(join(root, name))));
   entries.push(Buffer.alloc(1024)); const bytes = gzipSync(Buffer.concat(entries), { level: 9 });

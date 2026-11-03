@@ -48,7 +48,7 @@ test('统计从账号待办和通知已读状态计算，不把桌宠未送达�
 
 test('设置仅提交白名单，拒绝越界、非整数轮询值并隐藏凭据', () => {
   assert.equal(typeof model.settingsPatch, 'function');
-  assert.deepEqual(model.settingsPatch({ pollSeconds: '30', notificationsEnabled: false, petEnabled: true, petId: 'pet-1', password: 'secret', connectionFile: 'C:/x', baseUrl: 'https://evil.test' }), { pollSeconds: 30, notificationsEnabled: false, petEnabled: true, petId: 'pet-1' });
+  assert.deepEqual(model.settingsPatch({ pollSeconds: '30', notificationsEnabled: false, petEnabled: true, petId: 'pet-1', password: 'secret', connectionFile: 'C:/x', baseUrl: 'https://evil.test' }), { pollSeconds: 30, notificationsEnabled: false, petEnabled: true, petId: 'pet-1', petDurationSeconds: 10, petAlerts: { task: { animation: '', imageType: 'none', image: '' }, bug: { animation: '', imageType: 'none', image: '' } } });
   for (const pollSeconds of [29, 61, 30.5, '', 'bad']) assert.throws(() => model.settingsPatch({ pollSeconds }), /30.*60/);
 });
 
@@ -310,7 +310,7 @@ test('同步设置独立保存30到60整数，连接表单不回显Host密码', 
   const submit = async () => { const form = nodes(view, node => node.type === 'form' && node.props.className === 'zt-sync-form')[0]; await form.props.onSubmit({ preventDefault() {} }); view = ui.render(); };
   await submit(); assert.equal(saved.length, 0); assert.match(plainText(view), /30.*60/);
   poll().props.onChange({ target: { value: '60' } }); view = ui.render(); await submit();
-  assert.deepEqual(JSON.parse(JSON.stringify(saved)), [{ pollSeconds: 60, notificationsEnabled: true, petEnabled: true, petId: '' }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(saved)), [{ pollSeconds: 60, notificationsEnabled: true, petEnabled: true, petId: '', petDurationSeconds: 10, petAlerts: { task: { animation: '', imageType: 'none', image: '' }, bug: { animation: '', imageType: 'none', image: '' } } }]);
   ui.dispose();
 });
 

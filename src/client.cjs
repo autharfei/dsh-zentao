@@ -2,7 +2,7 @@
 const React = require('react');
 const model = require('./client-model.cjs');
 const { createElement: h, useState, useEffect, useMemo, useRef } = React;
-const { STATUS_LABELS, NOTICE_LABELS, TASK_STATUSES, BUG_STATUSES, filterItems, paginateItems, summarize, settingsPatch, connectionPatch, safeSiteUrl, buildSafeDocument, createApi, createOverviewStore } = model;
+const { STATUS_LABELS, NOTICE_LABELS, TASK_STATUSES, BUG_STATUSES, filterItems, paginateItems, summarize, petAlertsDraft, safePetImageUrl, settingsPatch, connectionPatch, safeSiteUrl, buildSafeDocument, createApi, createOverviewStore } = model;
 const name = 'zentao-ui';
 const inject = ['slots', 'locale', 'layout'];
 const EMPTY = { tasks: [], bugs: [], notifications: [], status: {}, settings: {}, account: '', baseUrl: '' };
@@ -263,57 +263,189 @@ function WorkspaceEntry({ openWorkspace, openPackage }) {
   return h('div', { className: 'zt-workspace-entry' }, h(EmptyState, { icon: 'grid', title: failed ? '请从侧栏打开禅道工作台' : '正在打开禅道工作台…', description: failed ? '禅道工作台会在右侧主区域完整显示。' : undefined, action: failed && openWorkspace ? h(Button, { onClick: openWorkspace }, '打开禅道工作台') : null }));
 }
 
+function PetAlertFields({ kind, profile, pet, loading, disabled, api, id, onChange, onUploading }) {
+  const title = kind === 'bug' ? 'Bug' : '任务';
+  const animations = asList(pet?.animations).filter(value => typeof value === 'string' && value);
+  const images = asList(pet?.images).filter(value => typeof value?.name === 'string' && value.name);
+  const recommended = animations.find(value => /jump|wave|dance|shake|bounce|excite|跳|挥|舞|摇|蹦/i.test(value));
+  const knownAnimation = !profile.animation || animations.includes(profile.animation);
+  const selectedImage = images.find(image => image.name === profile.image);
+  const [upload, setUpload] = useState({ busy: false, error: '', text: '', id: '', url: '' });
+  const [failedPreview, setFailedPreview] = useState('');
+  const alive = useRef(true);
+  const activeUpload = useRef(null);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; activeUpload.current?.reader?.abort(); activeUpload.current?.controller.abort(); };
+  }, []);
+  const previewUrl = profile.imageType === 'upload' && /^[a-f\d]{64}$/i.test(profile.image)
+    ? upload.id === profile.image ? upload.url : `/api/zentao/pet-image?id=${profile.image}`
+    : profile.imageType === 'meme' && selectedImage && typeof pet?.assetRoot === 'string'
+      ? `/dsh-pet-7340/pic/memes/${encodeURIComponent(pet.assetRoot)}/${encodeURIComponent(selectedImage.name)}.png`
+      : profile.imageType === 'url' ? safePetImageUrl(profile.image) : null;
+  useEffect(() => { setFailedPreview(''); }, [previewUrl]);
+  const change = patch => { setUpload(current => ({ ...current, error: '', text: '' })); onChange(patch); };
+  async function uploadImage(event) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || disabled || activeUpload.current) return;
+    if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) {
+      setUpload(current => ({ ...current, error: '请选择 PNG、JPEG、GIF 或 WebP 图片。', text: '' })); return;
+    }
+    if (!file.size || file.size > 2 * 1024 * 1024) {
+      setUpload(current => ({ ...current, error: '图片不能为空，大小须不超过 2 MiB。', text: '' })); return;
+    }
+    const operation = { reader: null, controller: new AbortController() };
+    activeUpload.current = operation;
+    setUpload(current => ({ ...current, busy: true, error: '', text: '' })); setFailedPreview(''); onUploading(kind, true);
+    try {
+      const data = await new Promise((resolve, reject) => {
+        const reader = new FileReader(); operation.reader = reader;
+        reader.onload = () => {
+          const match = typeof reader.result === 'string' && reader.result.match(/^data:[^,]*;base64,([a-z\d+/]+={0,2})$/i);
+          if (match) resolve(match[1]); else reject(new Error('读取图片失败，请重新选择图片。'));
+        };
+        reader.onerror = () => reject(new Error('读取图片失败，请重新选择图片。'));
+        reader.onabort = () => { const error = new Error('上传已取消'); error.name = 'AbortError'; reject(error); };
+        reader.readAsDataURL(file);
+      });
+      if (!alive.current || operation.controller.signal.aborted) return;
+      const result = await api.uploadPetImage({ data }, { signal: operation.controller.signal });
+      if (!alive.current || activeUpload.current !== operation) return;
+      if (!/^[a-f\d]{64}$/i.test(result?.id) || result.url !== `/api/zentao/pet-image?id=${result.id}`) throw new Error('上传响应无效，请重新上传。');
+      onChange({ imageType: 'upload', image: result.id });
+      setUpload({ busy: true, error: '', text: '图片已上传，保存设置后用于提醒。', id: result.id, url: result.url });
+    } catch (error) {
+      if (alive.current && error.name !== 'AbortError') setUpload(current => ({ ...current, error: error.message || '上传失败，请重试。', text: '' }));
+    } finally {
+      if (activeUpload.current === operation) {
+        activeUpload.current = null;
+        if (alive.current) { setUpload(current => ({ ...current, busy: false })); onUploading(kind, false); }
+      }
+    }
+  }
+  const imageHelp = profile.imageType === 'none' ? '头顶气泡仅显示提醒文字。'
+    : profile.imageType === 'meme' ? selectedImage?.description || (profile.image ? '当前桌宠暂不提供此池图，原选择会保留。' : '选择当前桌宠表情池中的图片。')
+      : profile.imageType === 'upload' ? '支持 PNG、JPEG、GIF、WebP，最多 2 MiB；上传后仍需保存设置。'
+        : '仅支持 HTTP / HTTPS，不含用户名、密码或片段（#）。';
+  return h('fieldset', { className: 'zt-pet-alert-fields' },
+    h('legend', null, h(Icon, { name: kind === 'bug' ? 'bug' : 'task', size: 15 }), `${title}提醒`),
+    h('div', { className: 'zt-pet-alert-inputs' },
+      h('div', { className: 'zt-pet-alert-field' }, h('label', { htmlFor: `${id}-animation` }, '提醒动作'),
+        h('select', { id: `${id}-animation`, value: profile.animation, disabled: disabled || loading, onChange: event => change({ animation: event.target.value }) },
+          h('option', { value: '' }, '不额外播放动作'),
+          !knownAnimation ? h('option', { value: profile.animation }, `${profile.animation}（当前桌宠暂不提供，保留原选择）`) : null,
+          ...animations.map(animation => h('option', { key: animation, value: animation }, `${animation}${animation === recommended ? '（推荐尝试）' : ''}`))),
+        h('p', { className: 'zt-pet-alert-help' }, '可尝试跳跃、挥手等较明显的已有动作；具体表现与播放时长由桌宠决定。')),
+      h('div', { className: 'zt-pet-alert-field' }, h('label', { htmlFor: `${id}-image-type` }, '气泡配图'),
+        h('select', { id: `${id}-image-type`, value: profile.imageType, disabled: disabled || upload.busy, onChange: event => change({ imageType: event.target.value, image: '' }) },
+          ...[['none', '不配图'], ['meme', '桌宠表情池'], ['upload', '上传图片'], ['url', '图片网址']].map(([value, caption]) => h('option', { value, key: value }, caption))),
+        h('p', { id: `${id}-image-help`, className: 'zt-pet-alert-help' }, imageHelp)),
+      profile.imageType === 'meme' ? h('div', { className: 'zt-pet-alert-field zt-pet-alert-wide' },
+        h('label', { htmlFor: `${id}-meme` }, '表情池图片'),
+        h('select', { id: `${id}-meme`, value: profile.image, disabled: disabled || loading, 'aria-describedby': `${id}-image-help`, onChange: event => change({ image: event.target.value }) },
+          h('option', { value: '' }, images.length ? '请选择图片' : '当前桌宠没有可用池图'),
+          profile.image && !selectedImage ? h('option', { value: profile.image }, `${profile.image}（当前桌宠暂不提供，保留原选择）`) : null,
+          ...images.map(image => h('option', { key: image.name, value: image.name, title: image.description }, image.description ? `${image.name} · ${image.description}` : image.name)))) : null,
+      profile.imageType === 'upload' ? h('div', { className: 'zt-pet-alert-field zt-pet-alert-wide', 'aria-busy': upload.busy },
+        h('label', { htmlFor: `${id}-upload` }, profile.image ? '替换上传图片' : '上传图片'),
+        h('input', { id: `${id}-upload`, type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp', disabled: disabled || upload.busy, 'aria-describedby': `${id}-image-help ${id}-upload-status`, onChange: uploadImage }),
+        h('span', { id: `${id}-upload-status`, className: `zt-pet-upload-status ${upload.error ? 'is-error' : ''}`, role: upload.error ? 'alert' : 'status', 'aria-live': 'polite' }, upload.busy ? '正在读取并上传图片…' : upload.error || upload.text || (profile.image ? '已选择上传图片，可在下方预览。' : '尚未选择图片。'))) : null,
+      profile.imageType === 'url' ? h('div', { className: 'zt-pet-alert-field zt-pet-alert-wide' },
+        h('label', { htmlFor: `${id}-url` }, '图片网址'),
+        h('input', { id: `${id}-url`, type: 'url', value: profile.image, placeholder: 'https://example.com/image.png', disabled, autoComplete: 'off', spellCheck: false, 'aria-describedby': `${id}-image-help`, 'aria-invalid': !!profile.image && !safePetImageUrl(profile.image), onChange: event => change({ image: event.target.value }) }),
+        profile.image && !safePetImageUrl(profile.image) ? h('p', { className: 'zt-pet-upload-status is-error', role: 'status' }, '请输入有效的 HTTP / HTTPS 图片网址，不含用户名、密码或片段（#）。') : null) : null),
+    h('figure', { className: 'zt-pet-image-preview' },
+      previewUrl && failedPreview !== previewUrl ? h('img', { src: previewUrl, alt: `${title}提醒的气泡配图预览`, loading: 'lazy', decoding: 'async', referrerPolicy: 'no-referrer', onError: () => setFailedPreview(previewUrl) }) : h('span', { className: 'zt-pet-preview-placeholder' }, previewUrl ? '图片加载失败，请检查图片或网址。' : profile.imageType === 'none' ? '仅文字提醒' : '选择图片后在此预览'),
+      h('figcaption', null, '气泡配图预览 · 外形由桌宠负责')));
+}
+
 function SettingsPanel({ settings = {}, connection, store, api, busy }) {
-  const initial = () => ({ pollSeconds: settings.pollSeconds ?? 45, notificationsEnabled: settings.notificationsEnabled !== false, petEnabled: settings.petEnabled !== false, petId: settings.petId || '' });
+  const initial = (value = settings) => ({ pollSeconds: value.pollSeconds ?? 45, notificationsEnabled: value.notificationsEnabled !== false, petEnabled: value.petEnabled !== false, petId: value.petId || '', petDurationSeconds: value.petDurationSeconds ?? 10, petAlerts: petAlertsDraft(value.petAlerts) });
+  // Canonical field order avoids resetting the draft for fresh objects returned by polling.
+  const savedKey = JSON.stringify(initial());
   const [draft, setDraft] = useState(initial);
   const [pets, setPets] = useState({ loading: true, available: false, pets: [], error: null });
   const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
+  const [testing, setTesting] = useState(null);
+  const [uploading, setUploading] = useState({ task: false, bug: false });
+  const [resetRevision, setResetRevision] = useState(0);
   const [feedback, setFeedback] = useState(null);
   const alive = useRef(true);
+  const dirty = useRef(false);
+  const uploads = useRef({ task: false, bug: false });
   const testController = useRef(null);
   const id = React.useId ? React.useId() : 'zentao-settings';
-  useEffect(() => { setDraft(initial()); }, [settings.pollSeconds, settings.notificationsEnabled, settings.petEnabled, settings.petId]);
+  useEffect(() => { if (!dirty.current && !Object.values(uploads.current).some(Boolean)) setDraft(initial()); }, [savedKey]);
   useEffect(() => {
     alive.current = true;
     const controller = new AbortController();
     api.pets({ signal: controller.signal }).then(data => { if (alive.current) setPets({ ...data, pets: asList(data.pets), loading: false }); }).catch(error => { if (alive.current && error.name !== 'AbortError') setPets({ loading: false, available: false, pets: [], error: error.message }); });
     return () => { alive.current = false; controller.abort(); testController.current?.abort(); };
   }, [api]);
-  const update = patch => { setDraft(current => ({ ...current, ...patch })); setFeedback(null); };
+  const update = patch => { dirty.current = true; setDraft(current => ({ ...current, ...patch })); setFeedback(null); };
+  const updateProfile = (kind, patch) => {
+    dirty.current = true;
+    setDraft(current => ({ ...current, petAlerts: { ...current.petAlerts, [kind]: { ...current.petAlerts[kind], ...patch } } })); setFeedback(null);
+  };
+  const uploadStatus = (kind, pending) => {
+    uploads.current = { ...uploads.current, [kind]: pending }; setUploading(uploads.current);
+    if (pending) { dirty.current = true; setFeedback(null); }
+  };
+  const hasUpload = uploading.task || uploading.bug;
   async function save(event) {
-    event.preventDefault(); setFeedback(null);
+    event.preventDefault();
+    if (saving || busy || Object.values(uploads.current).some(Boolean)) return;
+    setFeedback(null);
     let patch;
     try { patch = settingsPatch(draft); } catch (error) { setFeedback({ error: true, text: error.message }); return; }
     setSaving(true);
     try {
       const result = await store.saveSettings(patch);
-      if (alive.current) setFeedback(result ? { text: '设置已保存，立即生效' } : { error: true, text: '保存失败，请检查连接后重试' });
+      if (!alive.current) return;
+      if (result) { dirty.current = false; setDraft(initial(result.settings || patch)); setFeedback({ text: '设置已保存，立即生效' }); }
+      else setFeedback({ error: true, text: '保存失败，请检查连接后重试' });
     } catch (error) { if (alive.current) setFeedback({ error: true, text: error.message }); }
     finally { if (alive.current) setSaving(false); }
   }
-  async function testPet() {
-    setTesting(true); setFeedback(null);
-    const controller = new AbortController(); testController.current = controller;
-    try {
-      await api.petTest({ signal: controller.signal });
-      if (alive.current) setFeedback({ text: '测试请求已受理：禅道插件：桌宠提醒测试' });
-    } catch (error) { if (alive.current && error.name !== 'AbortError') setFeedback({ error: true, text: error.message }); }
-    finally { if (alive.current) setTesting(false); }
+  function reset(event) {
+    event.preventDefault();
+    if (saving || busy || Object.values(uploads.current).some(Boolean)) return;
+    dirty.current = false; setDraft(initial()); setResetRevision(current => current + 1); setFeedback({ text: '表单已恢复为已保存设置' });
   }
-  const knownPet = asList(pets.pets).some(pet => pet.id === draft.petId);
+  async function testPet(kind) {
+    if (testController.current || saving || busy) return;
+    setTesting(kind); setFeedback(null);
+    const controller = new AbortController(); testController.current = controller;
+    const title = kind === 'bug' ? 'Bug' : '任务';
+    try {
+      const result = await api.petTest({ kind, signal: controller.signal });
+      if (!alive.current) return;
+      if (result?.accepted !== true) throw new Error(`${title}测试请求未被受理`);
+      setFeedback(result.warning ? { warning: true, text: `${title}测试请求已受理，但有提示：${result.warning}` } : { text: `${title}测试请求已受理（使用已保存设置）` });
+    } catch (error) { if (alive.current && error.name !== 'AbortError') setFeedback({ error: true, text: error.message }); }
+    finally { if (testController.current === controller) testController.current = null; if (alive.current) setTesting(null); }
+  }
+  const desktopPets = asList(pets.pets).filter(pet => ['desktop', 'both'].includes(pet.display));
+  const selectedPet = draft.petId ? desktopPets.find(pet => pet.id === draft.petId) : desktopPets[0];
+  const knownPet = desktopPets.some(pet => pet.id === draft.petId);
   return h('div', { className: 'zt-settings' }, h('div', { className: 'zt-settings-heading' }, h('span', { className: 'zt-settings-symbol' }, h(Icon, { name: 'settings', size: 22 })), h('div', null, h('h2', null, '同步与提醒设置'), h('p', null, '让工作进展保持同步，让提醒恰到好处。'))),
     h(ConnectionPanel, { connection, store, busy }),
-    h('form', { className: 'zt-sync-form', onSubmit: save, noValidate: true },
+    h('form', { className: 'zt-sync-form', onSubmit: save, onReset: reset, noValidate: true },
       h('section', { className: 'zt-settings-section' }, h('h3', null, '同步'), h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { htmlFor: `${id}-poll` }, '后台轮询间隔'), h('p', null, '每次同步任务与 Bug；可设置 30～60 秒。')), h('div', { className: 'zt-number-input' }, h('input', { id: `${id}-poll`, type: 'number', min: 30, max: 60, step: 1, inputMode: 'numeric', value: draft.pollSeconds, disabled: saving, onChange: e => update({ pollSeconds: e.target.value }), 'aria-label': '后台轮询间隔（秒）' }), h('span', null, '秒')))),
       h('section', { className: 'zt-settings-section' }, h('h3', null, '通知与桌宠'),
         h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { id: `${id}-notifications` }, '接收新事项提醒'), h('p', null, '追踪新建、指派和重新指派给你的事项。')), h('button', { type: 'button', role: 'switch', 'aria-checked': draft.notificationsEnabled, 'aria-labelledby': `${id}-notifications`, className: 'zt-switch', disabled: saving, onClick: () => update({ notificationsEnabled: !draft.notificationsEnabled }) }, h('span', null))),
-        h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { id: `${id}-pet` }, '桌宠气泡提醒'), h('p', null, '合并展示新事项；桌宠不可用时仍保留通知。')), h('button', { type: 'button', role: 'switch', 'aria-checked': draft.petEnabled, 'aria-labelledby': `${id}-pet`, className: 'zt-switch', disabled: saving, onClick: () => update({ petEnabled: !draft.petEnabled }) }, h('span', null))),
-        h('div', { className: 'zt-setting-row zt-setting-pet' }, h('div', null, h('label', { htmlFor: `${id}-pet-target` }, '提醒桌宠'), h('p', null, pets.loading ? '正在读取可用桌宠…' : pets.available ? '自动选择支持桌面提醒的首只可用桌宠。' : '桌宠暂不可用，事项与通知仍可正常查看。')), h('select', { id: `${id}-pet-target`, value: draft.petId, disabled: saving || pets.loading || !draft.petEnabled, onChange: e => update({ petId: e.target.value }) }, h('option', { value: '' }, '自动'), !knownPet && draft.petId ? h('option', { value: draft.petId }, '已保存的桌宠（暂不可用）') : null, ...asList(pets.pets).map(pet => h('option', { value: pet.id, key: pet.id }, pet.name || pet.id)))),
+        h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { id: `${id}-pet` }, '桌宠头顶图文气泡'), h('p', null, '按任务、Bug 分开展示新事项；气泡外形由桌宠负责，不可用时仍保留通知。')), h('button', { type: 'button', role: 'switch', 'aria-checked': draft.petEnabled, 'aria-labelledby': `${id}-pet`, className: 'zt-switch', disabled: saving, onClick: () => update({ petEnabled: !draft.petEnabled }) }, h('span', null))),
+        h('div', { className: 'zt-setting-row zt-setting-pet' }, h('div', null, h('label', { htmlFor: `${id}-pet-target` }, '提醒桌宠'), h('p', null, pets.loading ? '正在读取可用桌宠…' : pets.available ? '自动选择首个支持桌面提醒的桌宠。' : '桌宠暂不可用，事项与通知仍可正常查看。')), h('select', { id: `${id}-pet-target`, value: draft.petId, disabled: saving || pets.loading || !draft.petEnabled, onChange: e => update({ petId: e.target.value }) }, h('option', { value: '' }, '自动'), !knownPet && draft.petId ? h('option', { value: draft.petId }, `${draft.petId}（已保存，当前桌面不可用）`) : null, ...desktopPets.map(pet => h('option', { value: pet.id, key: pet.id }, pet.name || pet.id)))),
         pets.error ? h('p', { className: 'zt-inline-warning', role: 'status' }, pets.error) : null,
-        h('div', { className: 'zt-pet-test' }, h('p', null, '测试使用已保存的设置，发送明确标注的测试提醒。'), h('button', { type: 'button', className: 'zt-button', disabled: testing || saving || !!busy || !pets.available, onClick: testPet }, h(Icon, { name: 'spark', size: 15 }), testing ? '正在发送…' : '发送测试提醒'))),
+        h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { htmlFor: `${id}-pet-duration` }, '气泡显示时长'), h('p', null, '可设置 5～120 秒，默认 10 秒；这不决定动作的播放时长。')), h('div', { className: 'zt-number-input' }, h('input', { id: `${id}-pet-duration`, type: 'number', min: 5, max: 120, step: 1, inputMode: 'numeric', value: draft.petDurationSeconds, disabled: saving, onChange: event => update({ petDurationSeconds: event.target.value }), 'aria-label': '气泡显示时长（秒）' }), h('span', null, '秒'))),
+        h('p', { className: 'zt-pet-catalog-help', role: 'status' }, pets.loading ? '正在读取动作和表情池…' : selectedPet ? `当前动作与表情池：${selectedPet.name || selectedPet.id}。切换桌宠会保留原选择，暂不支持的项会注明。` : '当前桌宠没有可枚举的桌面动作或表情池，已保存的选择会保留；仍可配置上传图片或图片网址。'),
+        h('div', { className: 'zt-pet-alert-profiles' }, ...['task', 'bug'].map(kind => h(PetAlertFields, { key: `${kind}:${resetRevision}`, kind, profile: draft.petAlerts[kind], pet: selectedPet, loading: pets.loading, disabled: saving, api, id: `${id}-${kind}`, onChange: patch => updateProfile(kind, patch), onUploading: uploadStatus }))),
+        h('div', { className: 'zt-pet-test' }, h('p', null, '以下测试使用已保存设置。修改或上传图片后，请先保存，再手动测试对应提醒。'),
+          h('div', { className: 'zt-pet-test-actions' }, ...[['task', '测试任务提醒'], ['bug', '测试 Bug 提醒']].map(([kind, caption]) => h('button', { key: kind, type: 'button', className: 'zt-button', disabled: !!testing || saving || !!busy || !pets.available, onClick: () => testPet(kind) }, h(Icon, { name: 'spark', size: 15 }), testing === kind ? '正在发送…' : caption))))),
       h('section', { className: 'zt-settings-section zt-connection' }, h('h3', null, '连接状态'), h('div', { className: 'zt-credential-status' }, h('i', { className: settings.hasCredentials ? 'is-ready' : '' }), settings.hasCredentials ? '宿主已读取连接凭据' : '尚未配置连接凭据'), h('p', null, '连接文件由宿主管理'), h('code', null, settings.connectionFile || '默认连接文件')),
-      h('div', { className: 'zt-settings-footer' }, h('span', { className: `zt-settings-feedback ${feedback?.error ? 'is-error' : ''}`, role: feedback?.error ? 'alert' : 'status', 'aria-live': 'polite' }, feedback?.text || '保存后立即生效'), h('button', { type: 'submit', className: 'zt-button zt-button-primary', disabled: saving || !!busy }, saving ? '正在保存…' : '保存设置'))));
+      h('div', { className: 'zt-settings-footer' }, h('span', { className: `zt-settings-feedback ${feedback?.error ? 'is-error' : feedback?.warning ? 'is-warning' : ''}`, role: feedback?.error ? 'alert' : 'status', 'aria-live': 'polite' }, feedback?.text || (hasUpload ? '图片上传中，请完成后保存设置' : '保存后立即生效')),
+        h('div', { className: 'zt-settings-actions' }, h('button', { type: 'reset', className: 'zt-button', disabled: saving || !!busy || hasUpload }, '恢复已保存设置'), h('button', { type: 'submit', className: 'zt-button zt-button-primary', disabled: saving || !!busy || hasUpload }, saving ? '正在保存…' : '保存设置')))));
 }
 
 function ZentaoApp({ store, api, settingsOnly = false }) {

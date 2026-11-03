@@ -3,7 +3,30 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 
-export const DEFAULT_SETTINGS = Object.freeze({ pollSeconds: 45, notificationsEnabled: true, petEnabled: true, petId: '' });
+const emptyAlert = () => ({ animation: '', imageType: 'none', image: '' });
+export const DEFAULT_SETTINGS = Object.freeze({ pollSeconds: 45, notificationsEnabled: true, petEnabled: true, petId: '', petDurationSeconds: 10, petAlerts: { task: emptyAlert(), bug: emptyAlert() } });
+export function normalizePetAlerts(raw) {
+  if (raw === undefined) return { task: emptyAlert(), bug: emptyAlert() };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => !['task', 'bug'].includes(key))) throw new Error('桌宠提醒配置格式无效');
+  const result = {};
+  for (const kind of ['task', 'bug']) {
+    const profile = raw[kind] === undefined ? emptyAlert() : raw[kind];
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile) || Object.keys(profile).some(key => !['animation', 'imageType', 'image'].includes(key))) throw new Error('桌宠提醒包含不允许的字段');
+    const { animation = '', imageType = 'none', image = '' } = profile;
+    if (typeof animation !== 'string' || animation.length > 200 || /[\u0000-\u001f]/.test(animation) || !['none', 'meme', 'upload', 'url'].includes(imageType) || typeof image !== 'string' || image.length > 2048) throw new Error('桌宠动作或气泡图片格式无效');
+    let value = image.trim();
+    if (imageType === 'none') value = '';
+    if (imageType === 'upload' && !/^[a-f0-9]{64}$/.test(value)) throw new Error('请先上传气泡图片');
+    if (imageType === 'meme' && (!value || value.length > 200 || /[\\/\u0000-\u001f]/.test(value))) throw new Error('请选择有效的桌宠表情图片');
+    if (imageType === 'url') {
+      let url; try { url = new URL(value); } catch { throw new Error('请输入有效的气泡图片网址'); }
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) throw new Error('气泡图片只支持无嵌入账号密码的 HTTP/HTTPS 网址');
+      value = url.href;
+    }
+    result[kind] = { animation: animation.trim(), imageType, image: value };
+  }
+  return result;
+}
 export function locations(raw = {}) {
   const home = resolve(raw.dshHome || process.env.DSH_HOME || join(homedir(), '.dsh'));
   const storageDir = resolve(raw.storageDir || join(home, 'storages', 'dsh-zentao'));
@@ -65,8 +88,9 @@ export function validateSettings(patch) {
   if ('pollSeconds' in patch && (!Number.isInteger(patch.pollSeconds) || patch.pollSeconds < 30 || patch.pollSeconds > 60)) throw new Error('同步间隔必须是 30～60 秒的整数');
   for (const key of ['notificationsEnabled', 'petEnabled']) if (key in patch && typeof patch[key] !== 'boolean') throw new Error('通知开关必须是布尔值');
   if ('petId' in patch && (typeof patch.petId !== 'string' || patch.petId.length > 100 || /[\u0000-\u001f]/.test(patch.petId))) throw new Error('桌宠编号无效');
-  return { ...patch };
+  if ('petDurationSeconds' in patch && (!Number.isInteger(patch.petDurationSeconds) || patch.petDurationSeconds < 5 || patch.petDurationSeconds > 120)) throw new Error('桌宠气泡显示时长须为 5～120 秒的整数');
+  return { ...patch, ...('petAlerts' in patch ? { petAlerts: normalizePetAlerts(patch.petAlerts) } : {}) };
 }
 export function publicSettings(settings, connectionFile, hasCredentials) {
-  return { ...Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map(key => [key, settings[key] ?? DEFAULT_SETTINGS[key]])), connectionFile, hasCredentials: Boolean(hasCredentials) };
+  return { ...Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map(key => [key, settings[key] ?? DEFAULT_SETTINGS[key]])), petAlerts: normalizePetAlerts(settings.petAlerts), connectionFile, hasCredentials: Boolean(hasCredentials) };
 }

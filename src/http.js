@@ -1,3 +1,4 @@
+import { MAX_ALERT_IMAGE_BYTES } from './alert-images.js';
 const PREFIX = '/api/zentao';
 const loopback = address => typeof address === 'string' && (address === '::1' || /^127\.\d+\.\d+\.\d+$/.test(address) || /^::ffff:127\.\d+\.\d+\.\d+$/.test(address));
 export function trustedRequest(req, { image = false } = {}) {
@@ -20,24 +21,24 @@ export function trustedRequest(req, { image = false } = {}) {
 function json(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' }); res.end(JSON.stringify(data));
 }
-async function body(req) {
+async function body(req, maximum = 65536) {
   if (!String(req.headers['content-type'] || '').startsWith('application/json')) throw new Error('请求必须使用 JSON');
   const chunks = []; let bytes = 0;
-  for await (const chunk of req) { bytes += chunk.length; if (bytes > 65536) throw new Error('请求内容超过限制'); chunks.push(chunk); }
+  for await (const chunk of req) { bytes += chunk.length; if (bytes > maximum) throw new Error('请求内容超过限制'); chunks.push(chunk); }
   let result; try { result = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { throw new Error('JSON 格式无效'); }
   if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('JSON 必须是对象');
   return result;
 }
 function numericId(value) { if (!/^\d+$/.test(value || '') || !Number.isSafeInteger(Number(value)) || Number(value) < 1) throw new Error('对象编号无效'); return value; }
-export function createHandler({ service, getClient, pet }) {
+export function createHandler({ service, getClient, pet, imageStore }) {
   return async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost'); const path = url.pathname.slice(PREFIX.length);
-    if (!trustedRequest(req, { image: path === '/image' && req.method === 'GET' })) return json(res, 403, { ok: false, error: '仅允许本机 DSH 同源访问' });
-    const allowed = { '/overview': ['GET'], '/refresh': ['POST'], '/detail': ['GET'], '/image': ['GET'], '/read': ['POST'], '/settings': ['GET', 'POST'], '/connection': ['GET', 'POST'], '/pets': ['GET'], '/pet-test': ['POST'] };
+    if (!trustedRequest(req, { image: ['/image', '/pet-image'].includes(path) && req.method === 'GET' })) return json(res, 403, { ok: false, error: '仅允许本机 DSH 同源访问' });
+    const allowed = { '/overview': ['GET'], '/refresh': ['POST'], '/detail': ['GET'], '/image': ['GET'], '/read': ['POST'], '/settings': ['GET', 'POST'], '/connection': ['GET', 'POST'], '/pets': ['GET'], '/pet-test': ['POST'], '/pet-image': ['GET', 'POST'] };
     if (!allowed[path]) return json(res, 404, { ok: false, error: '接口不存在' });
     if (!allowed[path].includes(req.method)) { res.setHeader('Allow', allowed[path].join(', ')); return json(res, 405, { ok: false, error: '请求方法不支持' }); }
     try {
-      const input = req.method === 'POST' ? await body(req) : {};
+      const input = req.method === 'POST' ? await body(req, path === '/pet-image' ? Math.ceil(MAX_ALERT_IMAGE_BYTES / 3) * 4 + 64 : 65536) : {};
       let data;
       switch (path) {
         case '/overview': data = service.overview(); break;
@@ -56,7 +57,20 @@ export function createHandler({ service, getClient, pet }) {
         case '/settings': data = req.method === 'GET' ? service.settings() : await service.updateSettings(input); break;
         case '/connection': data = req.method === 'GET' ? service.connection() : await service.saveConnection(input); break;
         case '/pets': try { data = await pet.list(); } catch (error) { data = { available: false, pets: [], error: error.message }; } break;
-        case '/pet-test': data = await pet.send('禅道插件：桌宠提醒测试。新任务和新 Bug 会在这里提示。'); break;
+        case '/pet-image': {
+          if (!imageStore) throw new Error('气泡图片存储尚未就绪');
+          if (req.method === 'POST') {
+            if (Object.keys(input).some(key => key !== 'data')) throw new Error('图片上传包含不允许的字段');
+            data = await imageStore.save(input.data); break;
+          }
+          const image = await imageStore.read(url.searchParams.get('id'));
+          res.writeHead(200, { 'Content-Type': image.type, 'Content-Length': image.body.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" }); res.end(image.body); return;
+        }
+        case '/pet-test': {
+          const kind = input.kind ?? 'task';
+          if (!['task', 'bug'].includes(kind) || Object.keys(input).some(key => key !== 'kind')) throw new Error('桌宠提醒类型无效');
+          data = await pet.send(`禅道插件：${kind === 'task' ? '任务' : 'Bug'}桌宠提醒测试。新指派会以此动作和气泡提示。`, { kind }); break;
+        }
       }
       json(res, 200, { ok: true, data });
     } catch (error) { if (!res.destroyed) json(res, path === '/refresh' || path === '/pet-test' ? 502 : 400, { ok: false, error: error.message || '请求失败，请稍后重试' }); }

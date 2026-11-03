@@ -4,7 +4,14 @@ import { DEFAULT_SETTINGS, validateSettings, publicSettings } from './config.js'
 const keyOf = item => `${item.kind}:${item.id}`;
 const initialScope = () => ({ baseline: null, tasks: [], bugs: [], notifications: [], lastSuccessAt: null });
 export function createService({ client, store, pet, clock = () => new Date(), connectionFile = '', connectionError = null }) {
-  let inFlight = null; let stopped = false; let timer = null; let shutdown = null;
+  let inFlight = null; let stopped = false; let timer = null; let shutdown = null; let delivery = null; let bubbleUntil = 0;
+  let deliveryAbort = new AbortController();
+  const pause = (ms, signal) => new Promise(resolve => {
+    const finish = () => { clearTimeout(timeout); signal.removeEventListener('abort', finish); resolve(); };
+    const timeout = setTimeout(finish, ms); timeout.unref?.();
+    signal.addEventListener('abort', finish, { once: true });
+    if (signal.aborted) finish();
+  });
   const commitGuard = { shouldCommit: () => !stopped };
   const status = { syncing: false, lastAttemptAt: null, error: connectionError, petError: null, nextSyncAt: null };
   const scopeKey = client?.scopeKey || 'unconfigured';
@@ -13,21 +20,28 @@ export function createService({ client, store, pet, clock = () => new Date(), co
   const now = () => clock().toISOString();
   const overview = () => ({ tasks: scope().tasks, bugs: scope().bugs, notifications: [...scope().notifications].reverse(),
     status: { ...status, lastSuccessAt: scope().lastSuccessAt }, settings: publicSettings(settings(), connectionFile, Boolean(client)), account: client?.account || '', baseUrl: client?.baseUrl || '' });
-  async function deliver() {
-    if (stopped || !pet || !settings().petEnabled || !settings().notificationsEnabled) return;
-    const pending = scope().notifications.filter(notice => !notice.read && !notice.delivered);
-    if (!pending.length) { status.petError = null; return; }
-    const ids = new Set(pending.map(notice => notice.id));
-    const taskCount = pending.filter(notice => notice.kind === 'task').length; const bugCount = pending.length - taskCount;
-    const countText = [taskCount && `${taskCount} 个任务`, bugCount && `${bugCount} 个 Bug`].filter(Boolean).join('、');
-    const titles = pending.slice(-2).map(notice => notice.title.replace(/\s+/g, ' ').slice(0, 48)).join('；');
-    try {
-      const result = await pet.send(`禅道：你有 ${countText} 新指派。${titles}${pending.length > 2 ? '…' : ''}`);
-      if (!result?.accepted) throw new Error('桌宠未受理提醒');
-      if (stopped) return;
-      await store.update(state => { for (const notice of state.scopes[scopeKey]?.notifications || []) if (ids.has(notice.id)) notice.delivered = true; }, commitGuard);
-      status.petError = null;
-    } catch (error) { if (!stopped) status.petError = error.message; }
+  function deliver() {
+    if (delivery || stopped || !pet || !settings().petEnabled || !settings().notificationsEnabled) return;
+    if (!scope().notifications.some(notice => !notice.read && !notice.delivered)) return;
+    const signal = (deliveryAbort = new AbortController()).signal;
+    delivery = (async () => {
+      while (!stopped && !signal.aborted && settings().petEnabled && settings().notificationsEnabled) {
+        if (bubbleUntil > Date.now()) await pause(bubbleUntil - Date.now(), signal);
+        if (stopped || signal.aborted || !settings().petEnabled || !settings().notificationsEnabled) return;
+        const pending = scope().notifications.filter(notice => !notice.read && !notice.delivered);
+        if (!pending.length) return;
+        const kind = pending[0].kind; const batch = pending.filter(notice => notice.kind === kind);
+        const ids = new Set(batch.map(notice => notice.id));
+        const titles = batch.slice(-2).map(notice => notice.title.replace(/\s+/g, ' ').slice(0, 48)).join('；');
+        const duration = settings().petDurationSeconds;
+        const result = await pet.send(`禅道：你有 ${batch.length} 个${kind === 'task' ? '任务' : ' Bug'}新指派。${titles}${batch.length > 2 ? '…' : ''}`, { kind, signal });
+        if (!result?.accepted) throw new Error('桌宠未受理提醒');
+        if (stopped) return;
+        bubbleUntil = Date.now() + (result.durationSeconds ?? duration) * 1000;
+        await store.update(state => { for (const notice of state.scopes[scopeKey]?.notifications || []) if (ids.has(notice.id)) notice.delivered = true; }, commitGuard);
+        status.petError = result.warning || null;
+      }
+    })().catch(error => { if (!stopped && !signal.aborted) status.petError = error.message; }).finally(() => { delivery = null; });
   }
   function refresh() {
     if (stopped) return Promise.resolve(overview());
@@ -54,7 +68,7 @@ export function createService({ client, store, pet, clock = () => new Date(), co
         current.baseline = baseline; current.tasks = snapshot.tasks; current.bugs = snapshot.bugs; current.lastSuccessAt = stamp;
         state.scopes[scopeKey] = current;
       }, commitGuard);
-      status.error = null; await deliver(); return overview();
+      status.error = null; deliver(); return overview();
     })().catch(error => { if (!stopped) status.error = error.message; throw error; }).finally(() => { status.syncing = false; inFlight = null; }).then(() => overview());
     return inFlight;
   }
@@ -65,12 +79,17 @@ export function createService({ client, store, pet, clock = () => new Date(), co
   }
   const service = { overview, refresh, settings: () => overview().settings,
     async markRead(ids) { if (stopped) throw new Error('插件已卸载'); const selected = ids === 'all' ? null : new Set(ids); await store.update(state => { for (const notice of state.scopes[scopeKey]?.notifications || []) if (!selected || selected.has(notice.id)) notice.read = true; }, commitGuard); return overview(); },
-    async updateSettings(patch) { if (stopped) throw new Error('插件已卸载'); const next = validateSettings(patch); await store.update(state => { state.settings = { ...DEFAULT_SETTINGS, ...state.settings, ...next }; }, commitGuard); if (timer) schedule(); return overview(); },
+    async updateSettings(patch) {
+      if (stopped) throw new Error('插件已卸载'); const next = validateSettings(patch);
+      await store.update(state => { state.settings = { ...DEFAULT_SETTINGS, ...state.settings, ...next }; }, commitGuard);
+      if (!settings().petEnabled || !settings().notificationsEnabled) { deliveryAbort.abort(); status.petError = null; }
+      if (timer) schedule(); return overview();
+    },
     start() { if (stopped || timer || !client) return; void refresh().catch(() => {}).finally(schedule); },
     stop() {
       if (shutdown) return shutdown;
-      stopped = true; clearTimeout(timer); timer = null; status.nextSyncAt = null; client?.stop?.(); pet?.stop?.();
-      shutdown = Promise.allSettled([inFlight, store.queue]).then(() => undefined); return shutdown;
+      stopped = true; deliveryAbort.abort(); clearTimeout(timer); timer = null; status.nextSyncAt = null; client?.stop?.(); pet?.stop?.();
+      shutdown = Promise.allSettled([inFlight, delivery, store.queue]).then(() => undefined); return shutdown;
     },
   };
   return service;

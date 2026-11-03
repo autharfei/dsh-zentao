@@ -11,8 +11,10 @@
 - `POST /connection` body `{baseUrl:string,account:string,password?:string}` -> overview。先验证登录，成功才原子保存到插件私有连接文件并切换后台同步。空密码仅在网址/账号均不变时保留；更换网址/账号必须输入密码。失败保留旧连接。新账号scope首次扫描不通知历史。
 - `GET /settings` -> Settings。
 - `POST /settings` body Settings可编辑字段 -> overview。字段白名单，禁止客户端传任意站点URL或密码。
-- `GET /pets` -> `{available:boolean,pets:[{id,name,display}],error?:string}`，从现有pet API读取，只返回列表。
-- `POST /pet-test` body `{}` -> `{accepted:true}` 或错误。明确发送“禅道插件：桌宠提醒测试”。
+- `GET /pets` -> `{available:boolean,pets:[{id,name,display,assetRoot,animations:string[],images:[{name,description}]}],error?:string}`，从dsh-pet 0.4 `/config`读取动作和表情池名称/描述，不返回凭据或模型提示词。
+- `POST /pet-image` body `{data:string}` -> `{id:string,type:string,bytes:number,url:string}`。仅接受不超过2MiB的PNG/JPEG/GIF/WebP纯base64，图片按SHA-256内容ID保存在本机；`GET /pet-image?id=64hex`只读返回图片，用户关闭插件时本机临时桌面图片服务停止。
+- `POST /pet-test` body `{kind:'task'|'bug'}` -> `{accepted:true,warning?:string}` 或错误。使用已保存的对应动作/配图配置，手动测试不会读取未保存草稿。
+
 
 Item公共字段：kind:'task'|'bug'，id:number，title:string，status:string，pri:number，assignedTo:{account:string,realname:string}，assignedDate:string，openedDate:string，lastEditedDate:string，projectName:string，productName:string；任务额外estimate/consumed/left/deadline/execution/story，Bug额外severity/resolution/resolvedDate。
 
@@ -20,6 +22,6 @@ Notice：`{id,kind,itemId,title,reason:'assigned'|'created'|'reassigned',created
 
 Status：`{syncing:boolean,lastSuccessAt:string|null,lastAttemptAt:string|null,error:string|null,petError:string|null,nextSyncAt:string|null}`。后台失败保留旧列表。
 
-Settings：`{pollSeconds:45,notificationsEnabled:true,petEnabled:true,petId:'',connectionFile:string,hasCredentials:boolean}`；可编辑pollSeconds（30..60整数）、notificationsEnabled、petEnabled、petId。connectionFile只显示不能从页面改成任意文件路径。无petId时Host选择支持desktop的首只可用宠物，页面显示为“自动”。
+Settings：`{pollSeconds:45,notificationsEnabled:true,petEnabled:true,petId:'',petDurationSeconds:10,petAlerts:{task:{animation:'',imageType:'none',image:''},bug:{animation:'',imageType:'none',image:''}},connectionFile:string,hasCredentials:boolean}`；可编辑pollSeconds（30..60整数）、notificationsEnabled、petEnabled、petId、petDurationSeconds（5..120整数）及两类petAlerts。imageType为none/meme/upload/url；meme为dsh-pet表情池名，upload为64位图片内容ID，url为无凭据HTTP/HTTPS完整地址。connectionFile只显示不能从页面改成任意文件路径。无petId时Host选择支持desktop/both的首只可用宠物，页面显示为“自动”。
 
 Client source `src/client.cjs` 使用 `require('react')`，最终 `module.exports={name:'zentao-ui',inject:['slots','locale','layout'],apply}`；build将其包装在DSH ModuleLoader factory内并注入常量 `STYLES`（CSS字符串）。可使用相对图片路由。Client导出`filterItems`等纯函数供node:test，但不依赖Node模块。注册sidebar.panellist(id:'zentao')、main(key:'zentao')、plugins.tab(id:'zentao')、plugins.bundle.config(key:'dsh-zentao')。plugins.tab使用owner.openPackage('dsh-zentao')复位宿主持久tab后layout.selectPanel('zentao')进入独立main，避免管理页头占据工作台上方空间及返回导航陷阱；组合包配置保持嵌入设置。任务/Bug页签徽标始终统计assignedTo.account等于当前account的个人事项总数（含全部状态）；搜索、状态筛选与“全部”范围不改写个人总数徽标，列表自身结果数另按筛选实时变化；上方待办卡片仅统计个人待办状态。使用locale.bind('zentao')，注册中英最少导航字典，界面主要中文。
