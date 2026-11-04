@@ -1,6 +1,6 @@
 {
   "name": "dsh-zentao",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "禅道任务与 Bug 工作台：列表详情、持久未读提醒及 dsh-pet 桌宠通知。",
   "type": "module",
   "main": "./lib/index.js",
@@ -13,7 +13,7 @@
   "keywords": ["dsh", "dsh-plugin", "zentao", "禅道", "dsh-pet"],
   "engines": { "node": ">=22.12.0", "dsh": ">=0.2.1-rc.3 <0.3.0-0" },
   "files": ["lib", "icon.svg", "cordis.patch.yml", "README.md", "LICENSE"],
-  "scripts": { "build": "node scripts/build.mjs", "test": "node --test --test-isolation=none", "pack": "node scripts/pack.mjs", "verify:live": "node scripts/verify-live.mjs" },
+  "scripts": { "build": "node scripts/build.mjs", "check:release": "node scripts/check-release.mjs", "test": "node --test --test-isolation=none", "pack": "node scripts/pack.mjs", "verify:live": "node scripts/verify-live.mjs" },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-slots", "@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-plugin-manager", "@deepseek-ai/dsh-client-ui-layout"] }

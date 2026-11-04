@@ -19,6 +19,20 @@ DeepSeek Harness 原生插件，在独立侧栏工作台查看禅道任务、Bug
 - 禅道须提供兼容的 `/api.php/v1` REST API 和账号密码令牌登录，账号应具备相关项目及产品的读取权限。
 - 桌宠气泡为可选功能，需要 dsh-pet `0.4.0` 或兼容版本并启用桌面显示。仅需一只桌面宠物时选“仅桌面”；“网页和桌面”会在两个位置显示同一只宠物。
 
+## 安装
+
+推荐在 DSH 的「插件 → 添加插件」中直接填写：
+
+```text
+https://github.com/autharfei/dsh-zentao.git
+```
+
+从 0.1.9 起，`main` 分支同时包含源码和已构建的 `lib/` 运行文件。Git 安装无需在安装者电脑上编译，也不依赖 `prepare` 或安装脚本。已经安装旧版时，按 DSH 的第三方插件更新流程处理，按宿主提示刷新或重启。
+
+直接从 GitHub 安装需要 Git 能访问 GitHub。若错误为连接超时或无法连接 `github.com:443`（可能同时标记 `failedAt: spec-host`），属于访问仓库阶段的网络问题，构建文件尚未开始加载；可改用本地 `.tgz` 安装。单独的失败阶段字段不能代替具体错误原因。
+
+GitHub 的「Code → Download ZIP」仍不是 DSH 支持的归档格式。现在 ZIP 内也包含运行文件，可先解压，再把包含 `package.json` 的 `dsh-zentao-main` 目录绝对路径填入 DSH；不要直接填 `.zip` 文件路径，也不要只改扩展名。
+
 ## 从源码构建安装包
 
 ```sh
@@ -27,11 +41,11 @@ cd dsh-zentao
 node scripts/pack.mjs
 ```
 
-命令会先构建 Host/Client，再生成 `dist/dsh-zentao-0.1.8.tgz`，同时输出包大小、文件清单和 SHA-256。
+命令会先构建 Host/Client，再生成 `dist/dsh-zentao-0.1.9.tgz`，同时输出包大小、文件清单和 SHA-256。
 
 在 DSH 的「插件 → 添加插件」中填生成的 `.tgz` 文件绝对路径，安装并启用。已经安装旧版时，按 DSH 第三方插件的卸载/重装流程更新；是否需重启以宿主提示为准。
 
-本仓库不跟踪生成的 `lib/` 和 `dist/`，下载源码后请先执行构建。GitHub 自动生成的源码 ZIP 不等于可直接安装的插件包。若维护者另行发布 Release 安装附件，可下载该 `.tgz` 使用。
+仓库跟踪固定清单内的 `lib/` 构建文件，以支持直接 Git 安装；`dist/` 和其他构建输出仍被忽略。修改源码后，维护者必须重新构建并一并提交 `lib/`，执行 `node scripts/check-release.mjs` 检查是否缺失或过期。该命令只核对发布文件，不执行插件或安装。若维护者另行发布 Release 安装附件，也可下载该 `.tgz` 使用。
 
 ## 首次配置
 
@@ -50,7 +64,7 @@ node scripts/pack.mjs
 - 密码以本机连接配置形式保存，不是操作系统密码保险库；请保护该目录的访问权限。密码和 Token 不放入客户端响应、通知状态或安装包。
 - 重新启动或升级会读取本人已保存的插件配置；将安装包分享给他人不会分享这些本地配置。
 - 富文本在禁脚本沙箱中展示，截图使用受控的同源附件代理，不向浏览器传递禅道登录凭据。
-- `.gitignore` 排除本地连接、环境文件、运行数据、日志、调试与生成产物。提交前仍需检查暂存区，避免把真实业务样本或凭据放进其他文件。
+- `.gitignore` 排除本地连接、环境文件、运行数据、日志、调试与非发布构建输出，仅放行固定清单的 `lib/` 文件。提交前仍需检查暂存区，避免把真实业务样本或凭据放进其他文件。
 
 ## 桌宠提醒定制
 
@@ -72,6 +86,7 @@ node scripts/pack.mjs
 
 ```sh
 node scripts/build.mjs
+node scripts/check-release.mjs
 node scripts/pack.mjs
 ```
 
@@ -83,7 +98,7 @@ node --test --test-isolation=none
 
 测试数据中的账号、密码与域名均为合成样本。浏览器检查按需启用，默认跳过；详见 [开发说明](docs/development.md)。手动联网检查脚本 `scripts/verify-live.mjs` 会使用本机已保存的插件连接，只输出数量和字段概况；不会在构建或普通测试中自动运行。
 
-接口契约见 [Host/Client contract](docs/contract.md)。当前源码版本为 `0.1.8`；本仓库公开整理不代表对该版本执行了新一轮功能测试或安装验收。
+接口契约见 [Host/Client contract](docs/contract.md)。当前源码版本为 `0.1.9`；本仓库公开整理不代表对该版本执行了新一轮功能测试或安装验收。
 
 ## 许可证
 

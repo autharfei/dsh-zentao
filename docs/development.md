@@ -6,11 +6,12 @@
 
 - `src/`：Host 生命周期、连接、同步、状态存储、HTTP、桌宠适配及客户端。
 - `scripts/build.mjs`：从源码生成 `lib/`，把客户端与样式包装为宿主模块。
-- `scripts/pack.mjs`：构建并按固定白名单生成安装包，输出 SHA-256。
+- `scripts/check-release.mjs`：只读核对 `lib/` 与源码逐字节一致、入口/patch齐全且无需安装时构建；不加载插件代码。
+- `scripts/pack.mjs`：构建、检查发布文件，再按固定白名单生成安装包，输出 SHA-256。
 - `scripts/verify-live.mjs`：可选的人工联网检查入口，使用操作者本机已保存的连接。
 - `test/`：合成数据的单元检查及按需启用的 Chromium 集成检查。
 
-`lib/`、`dist/`、本地配置与测试输出不进入 Git。发布安装包前运行 `node scripts/pack.mjs`；不要复制本机 DSH 数据目录到仓库。
+GitHub 安装直接使用仓库中的已构建文件，固定清单内的 11 个 `lib/` 文件必须进入 Git。`dist/`、其他构建输出、本地配置与测试输出仍不进入 Git。发布前运行 `node scripts/pack.mjs`（包含发布一致性检查），并将更新的 `lib/` 与源码一并提交；只检查、不改写文件时运行 `node scripts/check-release.mjs`。不要复制本机 DSH 数据目录到仓库。
 
 ## 单元检查
 
@@ -20,7 +21,7 @@
 node --test --test-isolation=none
 ```
 
-`--test-isolation=none` 用于避免受限 Windows 环境对子进程 stdio 管道的限制。构建相关用例会生成被忽略的 `lib/` 和 `dist/`。
+`--test-isolation=none` 用于避免受限 Windows 环境对子进程 stdio 管道的限制。构建相关用例会重新生成受跟踪的 `lib/` 及被忽略的 `dist/`。
 
 ## 可选 Chromium 检查
 
@@ -69,8 +70,16 @@ node --test --test-isolation=none
 
 富文本清理原先在递归之前将整个a节点替换为textContent，链接包裹的图片会丢失。现在先净化子节点，再通过既有非白名单标签拆包逻辑移除链接本身，保留合法截图及格式。图片仍只转为固定ID代理，原始href、事件属性、脚本和不支持的图片地址均不放行；CSP、sandbox与代理认证没有放宽。补充了对应的浏览器DOM回归定义，但未执行任何测试或真实图片请求。没有现场网络证据，不能将此代码缺陷认定为用户所见全部图片失败的唯一原因；接口权限、原始地址格式等剩余情况仍以原站查看为准。
 
+## 0.1.9 GitHub 直接安装
+
+修复源码仓库忽略整个 `lib/`、导致Git安装缺少运行入口的问题。现在仅放行固定11个Host/Client构建文件；不存在安装时执行的prepare/preinstall/install/postinstall脚本。`buildArtifacts()`只读取源码并构造预期字节，`build()`写入这些文件，`checkRelease()`只读比较实际文件与预期，拒绝缺失、过期和额外输出；pack先build再check。包清单和插件业务入口保持原有契约。
+
+维护者发布步骤：修改源码 → `node scripts/pack.mjs` → `node scripts/check-release.mjs` → 检查并提交源码、清单与lib → 推送。干净克隆只需运行check即可确认仓库产物完整，不需要安装依赖或执行插件。用户可在DSH输入GitHub仓库链接；GitHub ZIP需要先解压后使用包目录绝对路径，或使用本地tgz。网络下载失败与包入口缺失是两个阶段的问题。
+
+本轮仅语法、构建、发布文件一致性、归档内容及远端文件树检查；未执行测试、安装或GUI验收。
+
 ## 提交范围
 
 测试应使用 `example`、`invalid`、`.test` 域及合成账号，不放真实站点、响应、任务标题、截图或密码。不要提交 `.env`、连接文件、通知状态、私钥、凭据、访问令牌或日志。
 
-上传前检查 `git diff --cached` 与 `git status`。开源包只包含固定构建白名单，不包含测试、调试输出或用户存储。
+上传前检查 `git diff --cached` 与 `git status`。安装包只包含固定构建白名单，不包含测试、调试输出或用户存储；Git仓库额外包含源码、通用测试和构建工具。

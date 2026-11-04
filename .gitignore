@@ -1,6 +1,18 @@
-# Generated output and dependencies
+# Dependencies and non-distributed output
 /node_modules/
-/lib/
+# Git installations need these prebuilt entries; ignore all other lib output.
+/lib/*
+!/lib/alert-images.js
+!/lib/client.js
+!/lib/config.js
+!/lib/http.js
+!/lib/index.js
+!/lib/operations.js
+!/lib/pet.js
+!/lib/runtime.js
+!/lib/store.js
+!/lib/sync.js
+!/lib/zentao.js
 /dist/
 /coverage/
 /.nyc_output/

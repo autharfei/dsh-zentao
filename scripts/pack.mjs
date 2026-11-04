@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { build, root } from './build.mjs';
+import { checkRelease } from './check-release.mjs';
 
 function tarEntry(name, bytes) {
   const header = Buffer.alloc(512);
@@ -15,7 +16,8 @@ function tarEntry(name, bytes) {
   return Buffer.concat([header, bytes, Buffer.alloc((512 - bytes.length % 512) % 512)]);
 }
 export async function pack() {
-  await build(); const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+  await build(); await checkRelease();
+  const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   // Distribute only these known artifacts; never discover files in a user's
   // storage, MCP configuration, or extra files left in the build directory.
   const files = ['package.json', 'cordis.patch.yml', 'icon.svg', 'README.md', 'LICENSE',
