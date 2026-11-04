@@ -100,6 +100,24 @@ test('真实DOM清理主动内容、链接与危险属性，只保留代理图�
   assert.match(result.csp, /default-src 'none'/); assert.match(result.csp, /form-action 'none'/);
 });
 
+test('链接包裹的截图保留为代理图片，外层链接和危险子内容仍移除', { skip: !browserPath }, async () => {
+  const result = await evaluate(`(() => {
+    const raw = '<a href="https://evil.test/collect" onclick="alert(1)"><strong>步骤截图</strong>' +
+      '<img src="/zentao/file-read-321.png" onerror="alert(2)" srcset="https://evil.test/leak 2x">' +
+      '<script>parent.__linkedLeak=1</script></a>' +
+      '<a href="javascript:alert(3)"><img src="https://evil.test/tracker.png"></a>';
+    const output = ZentaoModel.buildSafeDocument(raw);
+    const doc = new DOMParser().parseFromString(output, 'text/html');
+    return { images: Array.from(doc.images, image => image.getAttribute('src')),
+      active: doc.querySelectorAll('a,script,[href],[onclick],[onerror],[srcset]').length,
+      label: doc.querySelector('strong')?.textContent, text: doc.body.textContent };
+  })()`);
+  assert.deepEqual(result.images, ['/api/zentao/image?id=321']);
+  assert.equal(result.active, 0);
+  assert.equal(result.label, '步骤截图');
+  assert.doesNotMatch(result.text, /__linkedLeak/);
+});
+
 test('清理阶段不产生外网请求，沙箱iframe不能执行脚本、表单或顶层导航', { skip: !browserPath }, async () => {
   await cdp('Network.enable');
   const requests = [];

@@ -140,8 +140,8 @@ function buildSafeDocument(html, options = {}) {
           if (node.nodeType !== 1) continue;
           const tag = node.localName.toLowerCase();
           if (BLOCKED_TAGS.has(tag) || node.namespaceURI !== 'http://www.w3.org/1999/xhtml') { node.remove(); continue; }
-          if (tag === 'a') { node.replaceWith(doc.createTextNode(node.textContent)); continue; }
           clean(node);
+          // Unwrap links only after cleaning their children, so linked screenshots survive.
           if (!ALLOWED_TAGS.has(tag)) { node.replaceWith(...Array.from(node.childNodes)); continue; }
           const style = [];
           for (let i = 0; i < node.style.length; i++) {
@@ -193,14 +193,20 @@ function createApi({ fetchImpl = (...args) => fetch(...args), timeoutMs = 20000 
     try {
       const response = await fetchImpl(`/api/zentao${path}`, { method: body === undefined ? 'GET' : 'POST', headers: body === undefined ? { accept: 'application/json' } : { accept: 'application/json', 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal, credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
       let payload;
-      try { payload = await response.json(); } catch { throw new Error(`服务返回了无效响应（HTTP ${response.status}）`); }
-      if (!response.ok || payload?.ok !== true) throw new Error(typeof payload?.error === 'string' ? payload.error : `请求失败，服务响应异常（HTTP ${response.status}）`);
-      if (!Object.prototype.hasOwnProperty.call(payload, 'data')) throw new Error('服务响应缺少数据');
+      try { payload = await response.json(); }
+      catch { const error = new Error(`服务返回了无效响应（HTTP ${response.status}）`); error.code = 'invalid-response'; throw error; }
+      if (!response.ok || payload?.ok !== true) {
+        const error = new Error(typeof payload?.error === 'string' ? payload.error : `请求失败，服务响应异常（HTTP ${response.status}）`);
+        if (payload?.code !== undefined) error.code = payload.code;
+        error.status = response.status;
+        throw error;
+      }
+      if (!Object.prototype.hasOwnProperty.call(payload, 'data')) { const error = new Error('服务响应缺少数据'); error.code = 'invalid-response'; throw error; }
       return payload.data;
     } catch (error) {
-      if (timedOut) throw new Error('请求超时，请检查连接后重试');
+      if (timedOut) { const timeoutError = new Error('请求超时，请检查连接后重试'); timeoutError.code = 'request-timeout'; throw timeoutError; }
       if (signal?.aborted) { const aborted = new Error('请求已取消'); aborted.name = 'AbortError'; throw aborted; }
-      if (error?.name === 'TypeError') throw new Error('无法连接插件服务，请检查网络后重试');
+      if (error?.name === 'TypeError') { const networkError = new Error('无法连接插件服务，请检查网络后重试'); networkError.code = 'network-error'; throw networkError; }
       throw error;
     } finally { clearTimeout(timeout); signal?.removeEventListener('abort', onAbort); }
   }
@@ -211,6 +217,22 @@ function createApi({ fetchImpl = (...args) => fetch(...args), timeoutMs = 20000 
       if (!['task', 'bug'].includes(kind)) throw new Error('仅支持任务和 Bug 详情');
       if (!Number.isSafeInteger(Number(id)) || Number(id) <= 0) throw new Error('详情编号无效');
       return request(`/detail?kind=${kind}&id=${Number(id)}`, options);
+    },
+    operationContext: async (kind, id, options = {}) => {
+      if (!['task', 'bug'].includes(kind)) throw new Error('仅支持任务和 Bug 操作');
+      if (!Number.isSafeInteger(Number(id)) || Number(id) <= 0) throw new Error('操作事项编号无效');
+      if (typeof options.scopeKey !== 'string' || !/^[a-f\d]{64}$/i.test(options.scopeKey)) throw new Error('列表连接标识缺失或无效，请先同步后重新打开操作表单');
+      return request(`/operation-context?kind=${kind}&id=${Number(id)}&scopeKey=${encodeURIComponent(options.scopeKey)}`, options);
+    },
+    operate: async (body, options = {}) => {
+      try { return await request('/operation', { ...options, body, requestTimeoutMs: Math.max(60000, timeoutMs, Number(options.requestTimeoutMs) || 0) }); }
+      catch (error) {
+        if (['request-timeout', 'network-error', 'invalid-response'].includes(error?.code) || ['TypeError', 'AbortError'].includes(error?.name)) {
+          const unknown = new Error('操作结果可能已生效。请先刷新事项或到禅道原站核对，勿重复提交；核对后重新加载表单。');
+          unknown.code = 'result-unknown'; throw unknown;
+        }
+        throw error;
+      }
     },
     read: (body, options) => request('/read', { ...options, body: body?.all ? { all: true } : { ids: list(body?.ids).filter(id => typeof id === 'string') } }),
     connection: options => request('/connection', options),
@@ -229,7 +251,7 @@ function createApi({ fetchImpl = (...args) => fetch(...args), timeoutMs = 20000 
 
 function createOverviewStore({ api = createApi(), setTimeout: later = setTimeout, clearTimeout: cancel = clearTimeout, pollMs = 15000 } = {}) {
   let state = { data: null, loading: false, error: null, busy: null };
-  let timer = null, active = null, revision = 0, disposed = false;
+  let timer = null, active = null, revision = 0, disposed = false, operation = null;
   const listeners = new Set();
   const publish = patch => { state = { ...state, ...patch }; for (const listener of listeners) listener(); };
   const clearTimer = () => { if (timer !== null) cancel(timer); timer = null; };
@@ -238,8 +260,7 @@ function createOverviewStore({ api = createApi(), setTimeout: later = setTimeout
     if (listeners.size && !disposed) timer = later(() => { timer = null; run('overview'); }, pollMs);
   };
   async function run(method, body) {
-    if (disposed) return null;
-    if (state.busy && method === 'overview') return null;
+    if (disposed || operation || state.busy) return null;
     clearTimer();
     const current = ++revision;
     active?.abort();
@@ -260,10 +281,31 @@ function createOverviewStore({ api = createApi(), setTimeout: later = setTimeout
   }
   function stop() {
     ++revision; clearTimer(); active?.abort(); active = null;
-    state = { ...state, loading: false, busy: null };
+    state = { ...state, loading: false, busy: operation ? 'operation' : null };
+  }
+  function acceptOverview(data) {
+    if (disposed || !data || (state.busy && state.busy !== 'operation')) return false;
+    // Only an overview GET can be superseded here; never abort another panel's write.
+    ++revision; clearTimer(); active?.abort(); active = null;
+    publish({ data, loading: false, error: null });
+    if (!operation) schedule();
+    return true;
+  }
+  function beginOperation() {
+    if (disposed || operation || state.busy) return null;
+    ++revision; clearTimer(); active?.abort(); active = null;
+    operation = {};
+    publish({ loading: false, error: null, busy: 'operation' });
+    return operation;
+  }
+  function endOperation(token) {
+    if (!token || token !== operation) return;
+    operation = null;
+    if (!disposed) { publish({ busy: null }); schedule(); }
   }
   return {
     getSnapshot: () => state,
+    acceptOverview, beginOperation, endOperation,
     subscribe(listener) {
       if (disposed) return () => {};
       const first = !listeners.size; listeners.add(listener);

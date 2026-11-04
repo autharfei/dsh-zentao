@@ -1,6 +1,7 @@
 'use strict';
 const React = require('react');
 const model = require('./client-model.cjs');
+const { ItemActions, OperationDialog } = require('./client-operations.cjs');
 const { createElement: h, useState, useEffect, useMemo, useRef } = React;
 const { STATUS_LABELS, NOTICE_LABELS, TASK_STATUSES, BUG_STATUSES, filterItems, paginateItems, summarize, petAlertsDraft, safePetImageUrl, settingsPatch, connectionPatch, safeSiteUrl, buildSafeDocument, createApi, createOverviewStore } = model;
 const name = 'zentao-ui';
@@ -109,7 +110,7 @@ function Pagination({ value, onPage, onSize }) {
     h('button', { type: 'button', className: 'zt-icon-button', disabled: value.page >= value.pages, onClick: () => onPage(value.page + 1), 'aria-label': '下一页' }, h(Icon, { name: 'chevron', size: 15 }))));
 }
 
-function ItemList({ items, kind, filters, onFilter, account, selection, onSelect, loading }) {
+function ItemList({ items, kind, filters, onFilter, account, selection, onSelect, loading, onOperate, busy }) {
   const [page, setPage] = useState(1);
   const [size, setSize] = useState(20);
   const filtered = useMemo(() => filterItems(items, filters, account), [items, filters, account]);
@@ -118,7 +119,7 @@ function ItemList({ items, kind, filters, onFilter, account, selection, onSelect
   const filteredActive = filters.query || filters.status !== 'all' || filters.priority !== 'all';
   return h('div', { className: 'zt-list-panel' }, h(Filters, { kind, value: filters, onChange: changeFilter, account, count: filtered.length }),
     loading ? h(LoadingState) : !paged.total ? h(EmptyState, { icon: kind === 'bug' ? 'bug' : 'task', title: filteredActive ? '没有匹配的结果' : filters.scope === 'mine' ? `暂无指派给你的${kind === 'bug' ? 'Bug' : '任务'}` : `暂无${kind === 'bug' ? 'Bug' : '任务'}`, description: filteredActive ? '试试其他关键字，或清除筛选条件。' : '同步完成后，事项会在这里显示。', action: filteredActive ? h(Button, { onClick: () => changeFilter({ ...filters, query: '', status: 'all', priority: 'all' }) }, '清除筛选') : null }) :
-      h('div', { className: 'zt-table-scroll' }, h('table', { className: 'zt-table' }, h('thead', null, h('tr', null, h('th', null, kind === 'bug' ? 'Bug / 问题' : '任务 / 事项'), h('th', null, '状态'), h('th', null, '优先级'), h('th', null, '负责人'), h('th', { className: 'zt-context-col' }, kind === 'bug' ? '所属产品' : '所属项目'), h('th', { className: 'zt-date-col' }, '更新'))),
+      h('div', { className: 'zt-table-scroll' }, h('table', { className: 'zt-table' }, h('thead', null, h('tr', null, h('th', null, kind === 'bug' ? 'Bug / 问题' : '任务 / 事项'), h('th', null, '状态'), h('th', null, '优先级'), h('th', null, '负责人'), h('th', { className: 'zt-context-col' }, kind === 'bug' ? '所属产品' : '所属项目'), h('th', { className: 'zt-date-col' }, '更新'), h('th', { className: 'zt-operations-col' }, '操作'))),
         h('tbody', null, ...paged.items.map(item => {
           const selected = selection?.kind === kind && Number(selection.id) === Number(item.id);
           const owner = item.assignedTo?.realname || item.assignedTo?.account;
@@ -128,7 +129,9 @@ function ItemList({ items, kind, filters, onFilter, account, selection, onSelect
             h('td', null, h(StatusBadge, { status: item.status })), h('td', null, h(Priority, { value: item.pri })),
             h('td', null, h('span', { className: 'zt-assignee' }, owner ? h('span', { className: 'zt-avatar', 'aria-hidden': true }, String(owner).slice(0, 1)) : null, h('span', null, owner || '未指派'))),
             h('td', { className: 'zt-context-col zt-muted', title: context }, context || '—'),
-            h('td', { className: 'zt-date-col zt-muted', title: formatTime(item.lastEditedDate || item.openedDate) }, formatTime(item.lastEditedDate || item.openedDate, true)));
+            h('td', { className: 'zt-date-col zt-muted', title: formatTime(item.lastEditedDate || item.openedDate) }, formatTime(item.lastEditedDate || item.openedDate, true)),
+            h('td', { className: 'zt-operations-col' }, h(ItemActions, { kind, item, onOperate, disabled: !!busy })));
+
         })))), h(Pagination, { value: paged, onPage: setPage, onSize: next => { setSize(next); setPage(1); } }));
 }
 
@@ -162,12 +165,13 @@ function RichText({ html, title = '描述', dark = false, compact = false }) {
     !compact ? h('button', { type: 'button', className: 'zt-text-button zt-rich-expand', onClick: () => setExpanded(!expanded), 'aria-expanded': expanded }, expanded ? '收起描述' : '展开描述') : null);
 }
 
-function DetailDrawer({ selection, api, baseUrl, onClose }) {
+function DetailDrawer({ selection, api, baseUrl, onClose, onOperate, busy, modalOpen = false, operationRevision = 0 }) {
   const key = `${selection.kind}:${selection.id}`;
   const [state, setState] = useState({ key: '', loading: true, data: null, error: null });
   const [section, setSection] = useState('description');
   const [retry, setRetry] = useState(0);
   const closeButton = useRef(null);
+  const modal = useRef(modalOpen); modal.current = modalOpen;
   const dark = useDarkTheme();
   useEffect(() => {
     const controller = new AbortController(); let alive = true;
@@ -176,13 +180,13 @@ function DetailDrawer({ selection, api, baseUrl, onClose }) {
       if (alive) setState({ key, loading: false, data, error: null });
     }).catch(error => { if (alive && error.name !== 'AbortError') setState({ key, loading: false, data: null, error: error.message }); });
     return () => { alive = false; controller.abort(); };
-  }, [key, api, retry]);
+  }, [key, api, retry, operationRevision]);
   useEffect(() => {
     const doc = globalThis.document;
     if (!doc) return undefined;
     const previous = doc.activeElement;
     closeButton.current?.focus();
-    const onKey = event => { if (event.key === 'Escape') { event.stopPropagation(); onClose(); } };
+    const onKey = event => { if (event.key === 'Escape' && !modal.current) { event.stopPropagation(); onClose(); } };
     doc.addEventListener('keydown', onKey);
     return () => { doc.removeEventListener('keydown', onKey); if (previous?.isConnected) previous.focus?.(); };
   }, [onClose]);
@@ -197,7 +201,8 @@ function DetailDrawer({ selection, api, baseUrl, onClose }) {
     loading ? h(LoadingState, { detail: true }) : state.error ? h(EmptyState, { icon: 'alert', title: '详情加载失败', description: state.error, action: h(Button, { onClick: () => setRetry(retry + 1) }, '重试') }) : detail ?
       h('div', { className: 'zt-detail-scroll' },
         h('div', { className: 'zt-detail-heading' }, h('h2', null, detail.title || '未命名事项'), h('div', { className: 'zt-detail-badges' }, h(StatusBadge, { status: detail.status }), h(Priority, { value: detail.pri }), detail.severity ? h('span', { className: 'zt-severity' }, `严重程度 S${detail.severity}`) : null),
-          external ? h('a', { href: external, target: '_blank', rel: 'noopener noreferrer', referrerPolicy: 'no-referrer', className: 'zt-external-link' }, '在禅道中打开', h(Icon, { name: 'external', size: 13 })) : null),
+          external ? h('a', { href: external, target: '_blank', rel: 'noopener noreferrer', referrerPolicy: 'no-referrer', className: 'zt-external-link' }, '在禅道中打开', h(Icon, { name: 'external', size: 13 })) : null,
+          h(ItemActions, { kind: selection.kind, item: { ...detail, id: selection.id }, onOperate, disabled: !!busy || modalOpen })),
         fields.length ? h('dl', { className: 'zt-detail-fields' }, ...fields.flatMap(([field, value]) => [h('dt', { key: `${field}-label` }, field), h('dd', { key: `${field}-value` }, label(value))])) : null,
         h('nav', { className: 'zt-detail-tabs', 'aria-label': '详情内容' }, ...[['description', selection.kind === 'bug' ? '复现步骤' : '任务描述'], ['actions', `操作记录 ${actions.length}`], ['files', `附件 ${files.length}`]].map(([id, title]) => h('button', { type: 'button', key: id, 'aria-current': section === id ? 'page' : undefined, onClick: () => setSection(id) }, title))),
         h('section', { className: 'zt-detail-section' },
@@ -248,6 +253,7 @@ function ConnectionPanel({ connection = {}, store, busy }) {
 }
 
 function WorkspaceEntry({ openWorkspace, openPackage }) {
+  const dark = useDarkTheme();
   const [failed, setFailed] = useState(false);
   const opened = useRef(false);
   useEffect(() => {
@@ -260,7 +266,7 @@ function WorkspaceEntry({ openWorkspace, openPackage }) {
       openWorkspace(); opened.current = true;
     } catch { setFailed(true); }
   }, [openWorkspace, openPackage]);
-  return h('div', { className: 'zt-workspace-entry' }, h(EmptyState, { icon: 'grid', title: failed ? '请从侧栏打开禅道工作台' : '正在打开禅道工作台…', description: failed ? '禅道工作台会在右侧主区域完整显示。' : undefined, action: failed && openWorkspace ? h(Button, { onClick: openWorkspace }, '打开禅道工作台') : null }));
+  return h('div', { className: 'zt-app zt-config-app zt-workspace-entry', 'data-theme': dark ? 'dark' : 'light' }, h(EmptyState, { icon: 'grid', title: failed ? '请从侧栏打开禅道工作台' : '正在打开禅道工作台…', description: failed ? '禅道工作台会在右侧主区域完整显示。' : undefined, action: failed && openWorkspace ? h(Button, { onClick: openWorkspace }, '打开禅道工作台') : null }));
 }
 
 function PetAlertFields({ kind, profile, pet, loading, disabled, api, id, onChange, onUploading }) {
@@ -432,15 +438,15 @@ function SettingsPanel({ settings = {}, connection, store, api, busy }) {
   return h('div', { className: 'zt-settings' }, h('div', { className: 'zt-settings-heading' }, h('span', { className: 'zt-settings-symbol' }, h(Icon, { name: 'settings', size: 22 })), h('div', null, h('h2', null, '同步与提醒设置'), h('p', null, '让工作进展保持同步，让提醒恰到好处。'))),
     h(ConnectionPanel, { connection, store, busy }),
     h('form', { className: 'zt-sync-form', onSubmit: save, onReset: reset, noValidate: true },
-      h('section', { className: 'zt-settings-section' }, h('h3', null, '同步'), h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { htmlFor: `${id}-poll` }, '后台轮询间隔'), h('p', null, '每次同步任务与 Bug；可设置 30～60 秒。')), h('div', { className: 'zt-number-input' }, h('input', { id: `${id}-poll`, type: 'number', min: 30, max: 60, step: 1, inputMode: 'numeric', value: draft.pollSeconds, disabled: saving, onChange: e => update({ pollSeconds: e.target.value }), 'aria-label': '后台轮询间隔（秒）' }), h('span', null, '秒')))),
+      h('section', { className: 'zt-settings-section' }, h('h3', null, '同步'), h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { htmlFor: `${id}-poll` }, '后台轮询间隔'), h('p', null, '每次同步任务与 Bug；可设置 30～60 秒。')), h('div', { className: 'zt-number-input' }, h('input', { id: `${id}-poll`, type: 'number', min: 30, max: 60, step: 1, inputMode: 'numeric', value: draft.pollSeconds, disabled: saving || !!busy, onChange: e => update({ pollSeconds: e.target.value }), 'aria-label': '后台轮询间隔（秒）' }), h('span', null, '秒')))),
       h('section', { className: 'zt-settings-section' }, h('h3', null, '通知与桌宠'),
-        h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { id: `${id}-notifications` }, '接收新事项提醒'), h('p', null, '追踪新建、指派和重新指派给你的事项。')), h('button', { type: 'button', role: 'switch', 'aria-checked': draft.notificationsEnabled, 'aria-labelledby': `${id}-notifications`, className: 'zt-switch', disabled: saving, onClick: () => update({ notificationsEnabled: !draft.notificationsEnabled }) }, h('span', null))),
-        h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { id: `${id}-pet` }, '桌宠头顶图文气泡'), h('p', null, '按任务、Bug 分开展示新事项；气泡外形由桌宠负责，不可用时仍保留通知。')), h('button', { type: 'button', role: 'switch', 'aria-checked': draft.petEnabled, 'aria-labelledby': `${id}-pet`, className: 'zt-switch', disabled: saving, onClick: () => update({ petEnabled: !draft.petEnabled }) }, h('span', null))),
-        h('div', { className: 'zt-setting-row zt-setting-pet' }, h('div', null, h('label', { htmlFor: `${id}-pet-target` }, '提醒桌宠'), h('p', null, pets.loading ? '正在读取可用桌宠…' : pets.available ? '自动选择首个支持桌面提醒的桌宠。' : '桌宠暂不可用，事项与通知仍可正常查看。')), h('select', { id: `${id}-pet-target`, value: draft.petId, disabled: saving || pets.loading || !draft.petEnabled, onChange: e => update({ petId: e.target.value }) }, h('option', { value: '' }, '自动'), !knownPet && draft.petId ? h('option', { value: draft.petId }, `${draft.petId}（已保存，当前桌面不可用）`) : null, ...desktopPets.map(pet => h('option', { value: pet.id, key: pet.id }, pet.name || pet.id)))),
+        h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { id: `${id}-notifications` }, '接收新事项提醒'), h('p', null, '追踪新建、指派和重新指派给你的事项。')), h('button', { type: 'button', role: 'switch', 'aria-checked': draft.notificationsEnabled, 'aria-labelledby': `${id}-notifications`, className: 'zt-switch', disabled: saving || !!busy, onClick: () => update({ notificationsEnabled: !draft.notificationsEnabled }) }, h('span', null))),
+        h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { id: `${id}-pet` }, '桌宠头顶图文气泡'), h('p', null, '按任务、Bug 分开展示新事项；气泡外形由桌宠负责，不可用时仍保留通知。')), h('button', { type: 'button', role: 'switch', 'aria-checked': draft.petEnabled, 'aria-labelledby': `${id}-pet`, className: 'zt-switch', disabled: saving || !!busy, onClick: () => update({ petEnabled: !draft.petEnabled }) }, h('span', null))),
+        h('div', { className: 'zt-setting-row zt-setting-pet' }, h('div', null, h('label', { htmlFor: `${id}-pet-target` }, '提醒桌宠'), h('p', null, pets.loading ? '正在读取可用桌宠…' : pets.available ? '自动选择首个支持桌面提醒的桌宠。' : '桌宠暂不可用，事项与通知仍可正常查看。')), h('select', { id: `${id}-pet-target`, value: draft.petId, disabled: saving || !!busy || pets.loading || !draft.petEnabled, onChange: e => update({ petId: e.target.value }) }, h('option', { value: '' }, '自动'), !knownPet && draft.petId ? h('option', { value: draft.petId }, `${draft.petId}（已保存，当前桌面不可用）`) : null, ...desktopPets.map(pet => h('option', { value: pet.id, key: pet.id }, pet.name || pet.id)))),
         pets.error ? h('p', { className: 'zt-inline-warning', role: 'status' }, pets.error) : null,
-        h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { htmlFor: `${id}-pet-duration` }, '气泡显示时长'), h('p', null, '可设置 5～120 秒，默认 10 秒；这不决定动作的播放时长。')), h('div', { className: 'zt-number-input' }, h('input', { id: `${id}-pet-duration`, type: 'number', min: 5, max: 120, step: 1, inputMode: 'numeric', value: draft.petDurationSeconds, disabled: saving, onChange: event => update({ petDurationSeconds: event.target.value }), 'aria-label': '气泡显示时长（秒）' }), h('span', null, '秒'))),
+        h('div', { className: 'zt-setting-row' }, h('div', null, h('label', { htmlFor: `${id}-pet-duration` }, '气泡显示时长'), h('p', null, '可设置 5～120 秒，默认 10 秒；这不决定动作的播放时长。')), h('div', { className: 'zt-number-input' }, h('input', { id: `${id}-pet-duration`, type: 'number', min: 5, max: 120, step: 1, inputMode: 'numeric', value: draft.petDurationSeconds, disabled: saving || !!busy, onChange: event => update({ petDurationSeconds: event.target.value }), 'aria-label': '气泡显示时长（秒）' }), h('span', null, '秒'))),
         h('p', { className: 'zt-pet-catalog-help', role: 'status' }, pets.loading ? '正在读取动作和表情池…' : selectedPet ? `当前动作与表情池：${selectedPet.name || selectedPet.id}。切换桌宠会保留原选择，暂不支持的项会注明。` : '当前桌宠没有可枚举的桌面动作或表情池，已保存的选择会保留；仍可配置上传图片或图片网址。'),
-        h('div', { className: 'zt-pet-alert-profiles' }, ...['task', 'bug'].map(kind => h(PetAlertFields, { key: `${kind}:${resetRevision}`, kind, profile: draft.petAlerts[kind], pet: selectedPet, loading: pets.loading, disabled: saving, api, id: `${id}-${kind}`, onChange: patch => updateProfile(kind, patch), onUploading: uploadStatus }))),
+        h('div', { className: 'zt-pet-alert-profiles' }, ...['task', 'bug'].map(kind => h(PetAlertFields, { key: `${kind}:${resetRevision}`, kind, profile: draft.petAlerts[kind], pet: selectedPet, loading: pets.loading, disabled: saving || !!busy, api, id: `${id}-${kind}`, onChange: patch => updateProfile(kind, patch), onUploading: uploadStatus }))),
         h('div', { className: 'zt-pet-test' }, h('p', null, '以下测试使用已保存设置。修改或上传图片后，请先保存，再手动测试对应提醒。'),
           h('div', { className: 'zt-pet-test-actions' }, ...[['task', '测试任务提醒'], ['bug', '测试 Bug 提醒']].map(([kind, caption]) => h('button', { key: kind, type: 'button', className: 'zt-button', disabled: !!testing || saving || !!busy || !pets.available, onClick: () => testPet(kind) }, h(Icon, { name: 'spark', size: 15 }), testing === kind ? '正在发送…' : caption))))),
       h('section', { className: 'zt-settings-section zt-connection' }, h('h3', null, '连接状态'), h('div', { className: 'zt-credential-status' }, h('i', { className: settings.hasCredentials ? 'is-ready' : '' }), settings.hasCredentials ? '宿主已读取连接凭据' : '尚未配置连接凭据'), h('p', null, '连接文件由宿主管理'), h('code', null, settings.connectionFile || '默认连接文件')),
@@ -448,19 +454,30 @@ function SettingsPanel({ settings = {}, connection, store, api, busy }) {
         h('div', { className: 'zt-settings-actions' }, h('button', { type: 'reset', className: 'zt-button', disabled: saving || !!busy || hasUpload }, '恢复已保存设置'), h('button', { type: 'submit', className: 'zt-button zt-button-primary', disabled: saving || !!busy || hasUpload }, saving ? '正在保存…' : '保存设置')))));
 }
 
+function overviewScope(data = {}) {
+  return `${data.baseUrl || data.connection?.baseUrl || ''}\n${data.account || data.connection?.account || ''}\n${data.scopeKey || ''}`;
+}
+
 function ZentaoApp({ store, api, settingsOnly = false }) {
   const [snapshot, setSnapshot] = useState(store.getSnapshot);
   const [tab, setTab] = useState(settingsOnly ? 'settings' : 'task');
   const [filters, setFilters] = useState({ task: { query: '', status: 'all', priority: 'all', scope: 'mine' }, bug: { query: '', status: 'all', priority: 'all', scope: 'mine' } });
   const [selected, setSelection] = useState(null);
+  const [operationSelection, setOperationSelection] = useState(null);
+  const [operationFeedback, setOperationFeedback] = useState(null);
+  const [operationRevision, setOperationRevision] = useState(0);
+  const currentScope = useRef('');
   const dark = useDarkTheme();
   useEffect(() => { const off = store.subscribe(() => setSnapshot(store.getSnapshot())); setSnapshot(store.getSnapshot()); return off; }, [store]);
   const needsConnection = snapshot.data?.settings?.hasCredentials === false;
   useEffect(() => { if (needsConnection) setTab('settings'); }, [needsConnection]);
   const data = snapshot.data || EMPTY;
-  const scope = `${data.baseUrl || data.connection?.baseUrl || ''}\n${data.account || data.connection?.account || ''}`;
+  const scope = overviewScope(data); currentScope.current = scope;
   const selection = selected?.scope === scope ? selected : null;
-  useEffect(() => { setSelection(null); }, [scope]);
+  const operation = operationSelection?.scope === scope ? operationSelection : null;
+  const modalOpen = !!operation;
+  const feedback = operationFeedback?.scope === scope ? operationFeedback : null;
+  useEffect(() => { setSelection(null); setOperationSelection(null); setOperationFeedback(null); }, [scope]);
   const counts = summarize(data);
   const status = data.status || {};
   const error = snapshot.error || status.error;
@@ -470,10 +487,23 @@ function ZentaoApp({ store, api, settingsOnly = false }) {
   const changeTab = next => { setTab(next); if (next === 'settings') setSelection(null); };
   const selectItem = next => setSelection({ ...next, scope });
   const closeDetail = useMemo(() => () => setSelection(null), []);
+  const openOperation = next => {
+    if (store.getSnapshot().busy || modalOpen) return;
+    setOperationFeedback(null); setOperationSelection({ ...next, scope, hostScope: data.scopeKey });
+  };
+  const operationApplied = (result, completed) => {
+    // Ignore a late response after another panel or the Host switched connections.
+    if (completed.scope !== currentScope.current || completed.scope !== overviewScope(store.getSnapshot().data || EMPTY)) return;
+    let warning = result.warning || '';
+    if (!result.overview || overviewScope(result.overview) !== completed.scope || !store.acceptOverview(result.overview)) warning = [warning, '操作已生效，列表尚未刷新，请同步后核对。'].filter(Boolean).join(' ');
+    setOperationRevision(value => value + 1); setOperationSelection(null);
+    setOperationFeedback({ scope: completed.scope, warning: !!warning, text: `${completed.label}已应用到${completed.kind === 'bug' ? 'Bug' : '任务'} #${completed.id}。${warning ? ` ${warning}` : ''}` });
+  };
   const myTaskTotal = filterItems(data.tasks, { scope: 'mine' }, data.account).length;
   const myBugTotal = filterItems(data.bugs, { scope: 'mine' }, data.account).length;
   const navigation = [['task', '任务', myTaskTotal, 'task'], ['bug', 'Bug', myBugTotal, 'bug'], ['notifications', '通知', counts.unread, 'bell']];
   return h('div', { className: `zt-app ${settingsOnly ? 'zt-config-app' : ''}`, 'data-theme': dark ? 'dark' : 'light' },
+    h('div', { className: 'zt-app-content', inert: modalOpen ? '' : undefined, 'aria-hidden': modalOpen ? true : undefined },
     h('header', { className: 'zt-header' }, h('div', { className: 'zt-title-group' }, h('span', { className: 'zt-brand' }, h(Icon, { name: 'grid', size: 24 })), h('div', null, h('div', { className: 'zt-title-line' }, h('h1', null, '禅道'), h('span', { className: `zt-connection-pill is-${connectionState}`, role: 'status' }, h('i', null), error ? '离线' : needsConnection ? '待配置' : syncing ? '同步中' : status.lastSuccessAt ? '已连接' : loading ? '连接中' : '等待同步')), h('p', null, settingsOnly ? '连接你的工作，管理同步与提醒。' : '把待办、问题与进展，放在同一个地方。'))),
       h('div', { className: 'zt-header-actions' }, data.account ? h('span', { className: 'zt-account', title: data.account }, h(Icon, { name: 'user', size: 14 }), data.account) : null,
         h(Button, { icon: 'refresh', onClick: () => store.refresh(), disabled: needsConnection || syncing || !!snapshot.busy, className: syncing ? 'zt-is-syncing' : '' }, syncing ? '同步中…' : '立即同步'),
@@ -481,14 +511,16 @@ function ZentaoApp({ store, api, settingsOnly = false }) {
     !settingsOnly ? h('div', { className: 'zt-stats' }, ...[[counts.tasks, '我的待办任务', 'task', 'task'], [counts.bugs, '我的待处理 Bug', 'bug', 'bug'], [counts.urgent, '优先级 P1', 'spark', 'urgent'], [counts.unread, '未读通知', 'bell', 'notice']].map(([count, title, icon, tone]) => h('div', { className: `zt-stat zt-stat-${tone}`, key: tone }, h('span', { className: 'zt-stat-icon' }, h(Icon, { name: icon, size: 19 })), h('div', null, h('span', { className: 'zt-stat-label' }, title), h('strong', null, loading ? '—' : count))))) : null,
     error ? h(ErrorBanner, { error, stale: !!snapshot.data && !!status.lastSuccessAt, onRetry: () => store.reload() }) : null,
     status.petError ? h('div', { className: 'zt-pet-warning', role: 'status' }, h(Icon, { name: 'bell', size: 14 }), `桌宠提醒暂不可用：${status.petError}。通知已保留。`) : null,
+    feedback ? h('div', { className: `zt-operation-feedback ${feedback.warning ? 'is-warning' : feedback.error ? 'is-error' : 'is-success'}`, role: feedback.error ? 'alert' : 'status', 'aria-live': 'polite' }, h('p', null, feedback.text), h('button', { type: 'button', className: 'zt-icon-button', 'aria-label': '关闭操作反馈', onClick: () => setOperationFeedback(null) }, '×')) : null,
     h('section', { className: `zt-workspace ${selection && tab !== 'settings' ? 'has-detail' : ''}` },
       h('div', { className: 'zt-workspace-main' },
         !settingsOnly ? h('div', { className: 'zt-workspace-nav' }, h('nav', { className: 'zt-tabs', 'aria-label': '禅道事项' }, ...navigation.map(([id, title, count, icon]) => h('button', { type: 'button', key: id, 'aria-current': tab === id ? 'page' : undefined, onClick: () => changeTab(id) }, h(Icon, { name: icon, size: 16 }), title, h('span', { className: id === 'notifications' && count ? 'zt-tab-count is-unread' : 'zt-tab-count', title: id === 'task' ? '指派给我的任务总数' : id === 'bug' ? '指派给我的 Bug 总数' : '我的未读通知数' }, count)))), h('span', { className: 'zt-readonly-hint' }, '实时掌握工作进展')) : null,
         tab === 'settings' ? loading ? h(LoadingState) : h(SettingsPanel, { settings: data.settings, connection: data.connection || { baseUrl: data.baseUrl, account: data.account, hasPassword: !!data.settings?.hasCredentials }, store, api, busy: snapshot.busy }) : null,
-        tab === 'task' || tab === 'bug' ? h(ItemList, { key: `${scope}:${tab}`, items: tab === 'task' ? data.tasks : data.bugs, kind: tab, filters: filters[tab], onFilter: value => setFilters(current => ({ ...current, [tab]: value })), account: data.account, selection, onSelect: selectItem, loading }) : null,
+        tab === 'task' || tab === 'bug' ? h(ItemList, { key: `${scope}:${tab}`, items: tab === 'task' ? data.tasks : data.bugs, kind: tab, filters: filters[tab], onFilter: value => setFilters(current => ({ ...current, [tab]: value })), account: data.account, selection, onSelect: selectItem, loading, onOperate: openOperation, busy: snapshot.busy || modalOpen }) : null,
         tab === 'notifications' ? loading ? h(LoadingState) : h(NoticeList, { notifications: data.notifications, onRead: value => store.markRead(value), onSelect: selectItem, busy: snapshot.busy }) : null),
-      selection && tab !== 'settings' ? h(DetailDrawer, { key: `${scope}:${selection.kind}:${selection.id}`, selection, api, baseUrl: data.baseUrl, onClose: closeDetail }) : null),
-    h('footer', { className: 'zt-footer' }, h('span', { className: 'zt-last-sync' }, h(Icon, { name: 'clock', size: 12 }), `最近成功同步：${status.lastSuccessAt ? formatTime(status.lastSuccessAt) : '尚未成功同步'}`), h('span', null, needsConnection ? '填写并保存禅道连接后开启自动同步' : data.settings?.pollSeconds ? `每 ${data.settings.pollSeconds} 秒同步` : '自动同步', status.nextSyncAt ? ` · 下次 ${formatTime(status.nextSyncAt, true)}` : '')));
+      selection && tab !== 'settings' ? h(DetailDrawer, { key: `${scope}:${selection.kind}:${selection.id}`, selection, api, baseUrl: data.baseUrl || data.connection?.baseUrl, onClose: closeDetail, onOperate: openOperation, busy: snapshot.busy, modalOpen, operationRevision }) : null),
+    h('footer', { className: 'zt-footer' }, h('span', { className: 'zt-last-sync' }, h(Icon, { name: 'clock', size: 12 }), `最近成功同步：${status.lastSuccessAt ? formatTime(status.lastSuccessAt) : '尚未成功同步'}`), h('span', null, needsConnection ? '填写并保存禅道连接后开启自动同步' : data.settings?.pollSeconds ? `每 ${data.settings.pollSeconds} 秒同步` : '自动同步', status.nextSyncAt ? ` · 下次 ${formatTime(status.nextSyncAt, true)}` : ''))),
+    operation ? h(OperationDialog, { key: `${operation.scope}:${operation.kind}:${operation.id}`, selection: operation, api, store, baseUrl: data.baseUrl || data.connection?.baseUrl, busy: snapshot.busy, onDismiss: () => setOperationSelection(null), onApplied: operationApplied, onFeedback: value => { if (value.scope === currentScope.current) setOperationFeedback(value); } }) : null);
 }
 
 function acquireStyles() {
@@ -551,4 +583,4 @@ function apply(ctx) {
   }, 'zentao: client interface');
 }
 
-module.exports = { name, inject, apply, ...model, ZentaoApp, WorkspaceEntry, ConnectionPanel, DetailDrawer, SettingsPanel, NoticeList, ItemList, RichText };
+module.exports = { name, inject, apply, ...model, ZentaoApp, WorkspaceEntry, ConnectionPanel, DetailDrawer, SettingsPanel, NoticeList, ItemList, RichText, ItemActions, OperationDialog };

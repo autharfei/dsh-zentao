@@ -7,7 +7,8 @@ export function normalizeItem(kind, raw, extra = {}) {
     assignedTo: user(raw.assignedTo), assignedDate: text(raw.assignedDate), openedDate: text(raw.openedDate), lastEditedDate: text(raw.lastEditedDate),
     projectName: text(raw.projectName || extra.projectName), productName: text(raw.productName || extra.productName), executionName: text(raw.executionName || extra.executionName),
     estimate: text(raw.estimate), consumed: text(raw.consumed), left: text(raw.left), deadline: text(raw.deadline), execution: raw.execution || 0, story: raw.story || 0,
-    severity: Number(raw.severity) || 0, resolution: text(raw.resolution), resolvedDate: text(raw.resolvedDate) };
+    severity: Number(raw.severity) || 0, resolution: text(raw.resolution), resolvedDate: text(raw.resolvedDate), confirmed: Number(raw.confirmed) || 0,
+    parent: Number(raw.parent) || 0, type: text(raw.type), mode: text(raw.mode), product: Number(raw.product?.id ?? raw.product) || 0, project: Number(raw.project?.id ?? raw.project) || 0 };
 }
 const unique = rows => [...new Map(rows.filter(row => Number.isSafeInteger(row.id) && row.id > 0).map(row => [row.id, row])).values()];
 
@@ -18,9 +19,12 @@ export class ZentaoClient {
     this.abort = new AbortController();
     this.scopeKey = createHash('sha256').update(`${this.baseUrl}\n${account}`).digest('hex');
   }
-  async request(url, options = {}) {
+  async request(url, options = {}, mutation = false) {
     try { return await this.fetchImpl(url, { ...options, redirect: 'error', signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(this.timeoutMs)]) }); }
-    catch (error) { throw new Error(error.name === 'TimeoutError' ? '禅道请求超时，请检查网络后重试' : '无法连接禅道，请检查网络及地址'); }
+    catch (error) {
+      if (mutation) { const pending = new Error('禅道提交结果尚未确认，操作可能已经生效。请先刷新或在禅道核对，勿直接重复提交'); pending.code = 'result-unknown'; pending.status = 504; throw pending; }
+      throw new Error(error.name === 'TimeoutError' ? '禅道请求超时，请检查网络后重试' : '无法连接禅道，请检查网络及地址');
+    }
   }
   async login(force = false) {
     if (this.loginPromise) return this.loginPromise;
@@ -42,6 +46,39 @@ export class ZentaoClient {
     if ([401, 403].includes(response.status)) { await this.login(true); response = await this.request(url, { headers: { Token: this.token } }); }
     if (!response.ok) throw new Error(`禅道 ${endpoint} 读取失败（HTTP ${response.status}）`);
     try { return await response.json(); } catch { throw new Error(`禅道 ${endpoint} 返回了无效数据`); }
+  }
+  async write(endpoint, body, { method = 'POST' } = {}) {
+    if (!['POST', 'PUT'].includes(method) || !/^(tasks|bugs)\/[1-9]\d*(?:\/[a-z]+)?$/.test(endpoint)) throw new Error('禅道操作接口无效');
+    await this.login();
+    // A business write is sent exactly once. A timeout or an unreadable success
+    // response is ambiguous and must never trigger an automatic replay.
+    const usedToken = this.token;
+    const response = await this.request(`${this.baseUrl}/api.php/v1/${endpoint}`, { method, headers: { Token: usedToken, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, true);
+    let data; try { data = await response.json(); } catch {
+      const unknown = response.ok || response.status >= 500;
+      const error = new Error(unknown ? '禅道已响应但操作结果无法识别，请先刷新或在禅道核对，勿重复提交' : `禅道操作失败（HTTP ${response.status}），请在原站检查权限与接口版本`);
+      error.code = unknown ? 'result-unknown' : [404, 405].includes(response.status) ? 'unsupported' : 'remote-error'; error.status = unknown ? 502 : response.status; throw error;
+    }
+    if (response.status >= 500) { const error = new Error('禅道服务返回异常，操作结果尚未确认。请先刷新或在原站核对，勿重复提交'); error.code = 'result-unknown'; error.status = 502; throw error; }
+    if (!response.ok || data?.status === 'fail' || data?.result === 'fail' || data?.error) {
+      if (response.status === 401) this.token = null;
+      const source = data?.message ?? data?.error ?? '';
+      const parts = typeof source === 'string' ? [source] : source && typeof source === 'object' ? Object.entries(source).flatMap(([key, value]) => (Array.isArray(value) ? value : [value]).filter(item => typeof item === 'string').map(item => `${key}: ${item}`)) : [];
+      let message = parts.join('；').replace(/<[^>]*>/g, ' ').replace(/[\u0000-\u001f]/g, ' ');
+      for (const secret of [this.password, usedToken]) if (secret) message = message.split(secret).join('[已隐藏]');
+      message = message.slice(0, 600);
+      const reason = response.status === 403 ? '当前账号没有此操作权限' : response.status === 401 ? '登录已失效，请刷新后重新操作' : [404, 405].includes(response.status) ? '当前禅道版本未提供此操作接口，请使用原站入口' : '禅道拒绝了该操作，请检查必填项和当前状态';
+      const error = new Error(`${reason}${message ? `：${message}` : ''}`); error.status = response.status >= 400 ? response.status : 422; error.code = [404, 405].includes(response.status) ? 'unsupported' : 'rejected'; throw error;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) { const error = new Error('禅道操作结果无法识别，请刷新核对后再操作'); error.code = 'result-unknown'; error.status = 502; throw error; }
+    return data;
+  }
+  async rawItem(kind, id) {
+    if (!['task', 'bug'].includes(kind)) throw new Error('对象类型无效');
+    if (!/^\d+$/.test(String(id)) || !Number.isSafeInteger(Number(id)) || Number(id) < 1) throw new Error('对象编号无效');
+    const raw = await this.get(`${kind === 'task' ? 'tasks' : 'bugs'}/${Number(id)}`); const item = raw.id ? raw : raw[kind];
+    if (!item || typeof item !== 'object' || Array.isArray(item) || Number(item.id) !== Number(id)) throw new Error('禅道详情格式错误');
+    return item;
   }
   async pages(endpoint, key, params = {}) {
     const all = []; const seen = new Set(); const seenIds = new Set(); let expectedTotal = null;
@@ -104,12 +141,8 @@ export class ZentaoClient {
     }
     return { tasks: [...tasks.values()], bugs: unique(bugs), account: this.account, baseUrl: this.baseUrl, scopeKey: this.scopeKey };
   }
-  async detail(kind, id) {
-    if (!['task', 'bug'].includes(kind)) throw new Error('对象类型无效');
-    if (!/^\d+$/.test(String(id)) || !Number.isSafeInteger(Number(id)) || Number(id) < 1) throw new Error('对象编号无效');
-    const raw = await this.get(`${kind === 'task' ? 'tasks' : 'bugs'}/${Number(id)}`);
-    const item = raw.id ? raw : raw[kind];
-    if (!item || typeof item !== 'object' || Number(item.id) !== Number(id)) throw new Error('禅道详情格式错误');
+  async detail(kind, id) { return this.detailFromRaw(kind, id, await this.rawItem(kind, id)); }
+  detailFromRaw(kind, id, item) {
     const fields = {};
     const mapping = kind === 'task' ? { '所属执行': 'executionName', '关联需求': 'storyTitle', '预计工时': 'estimate', '已消耗工时': 'consumed', '剩余工时': 'left', '截止日期': 'deadline', '创建时间': 'openedDate', '指派时间': 'assignedDate' }
       : { '所属产品': 'productName', '所属执行': 'executionName', '关联需求': 'storyTitle', '解决方案': 'resolution', '解决版本': 'resolvedBuild', '创建时间': 'openedDate', '指派时间': 'assignedDate', '解决时间': 'resolvedDate' };

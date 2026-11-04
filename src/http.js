@@ -34,7 +34,7 @@ export function createHandler({ service, getClient, pet, imageStore }) {
   return async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost'); const path = url.pathname.slice(PREFIX.length);
     if (!trustedRequest(req, { image: ['/image', '/pet-image'].includes(path) && req.method === 'GET' })) return json(res, 403, { ok: false, error: '仅允许本机 DSH 同源访问' });
-    const allowed = { '/overview': ['GET'], '/refresh': ['POST'], '/detail': ['GET'], '/image': ['GET'], '/read': ['POST'], '/settings': ['GET', 'POST'], '/connection': ['GET', 'POST'], '/pets': ['GET'], '/pet-test': ['POST'], '/pet-image': ['GET', 'POST'] };
+    const allowed = { '/overview': ['GET'], '/refresh': ['POST'], '/detail': ['GET'], '/image': ['GET'], '/read': ['POST'], '/settings': ['GET', 'POST'], '/connection': ['GET', 'POST'], '/pets': ['GET'], '/pet-test': ['POST'], '/pet-image': ['GET', 'POST'], '/operation-context': ['GET'], '/operation': ['POST'] };
     if (!allowed[path]) return json(res, 404, { ok: false, error: '接口不存在' });
     if (!allowed[path].includes(req.method)) { res.setHeader('Allow', allowed[path].join(', ')); return json(res, 405, { ok: false, error: '请求方法不支持' }); }
     try {
@@ -53,6 +53,8 @@ export function createHandler({ service, getClient, pet, imageStore }) {
           const image = await client.image(numericId(url.searchParams.get('id')));
           res.writeHead(200, { 'Content-Type': image.type, 'Content-Length': image.body.length, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; sandbox" }); res.end(image.body); return;
         }
+        case '/operation-context': data = await service.operationContext(url.searchParams.get('kind'), numericId(url.searchParams.get('id')), url.searchParams.get('scopeKey')); break;
+        case '/operation': data = await service.operate(input); break;
         case '/read': if (input.all === true) data = await service.markRead('all'); else { if (!Array.isArray(input.ids) || input.ids.length > 5000 || input.ids.some(id => typeof id !== 'string' || id.length > 100)) throw new Error('通知编号列表无效'); data = await service.markRead(input.ids); } break;
         case '/settings': data = req.method === 'GET' ? service.settings() : await service.updateSettings(input); break;
         case '/connection': data = req.method === 'GET' ? service.connection() : await service.saveConnection(input); break;
@@ -73,6 +75,9 @@ export function createHandler({ service, getClient, pet, imageStore }) {
         }
       }
       json(res, 200, { ok: true, data });
-    } catch (error) { if (!res.destroyed) json(res, path === '/refresh' || path === '/pet-test' ? 502 : 400, { ok: false, error: error.message || '请求失败，请稍后重试' }); }
+    } catch (error) {
+      const status = ['/operation', '/operation-context'].includes(path) && [400, 401, 403, 404, 405, 409, 422, 429, 502, 504].includes(error.status) ? error.status : path === '/refresh' || path === '/pet-test' ? 502 : 400;
+      if (!res.destroyed && !res.writableEnded) json(res, status, { ok: false, error: error.message || '请求失败，请稍后重试', ...(error.code ? { code: error.code } : {}) });
+    }
   };
 }

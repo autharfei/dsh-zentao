@@ -231,7 +231,7 @@ function loadClient(reactOverrides = {}, globals = {}) {
   assert.ok(fs.existsSync(filename), 'Client入口应存在');
   const module = { exports: {} };
   const sandbox = { module, exports: module.exports, STYLES: '.zt-app{}', AbortController, setTimeout, clearTimeout,
-    require(id) { if (id === 'react') return { createElement(type, props, ...children) { return { type, props: { ...props, children } }; }, ...reactOverrides }; if (id === './client-model.cjs') return model; throw new Error(`unexpected require: ${id}`); },
+    require(id) { if (id === 'react') return { createElement(type, props, ...children) { return { type, props: { ...props, children } }; }, ...reactOverrides }; if (id === './client-model.cjs') return model; if (id === './client-operations.cjs') { const operationFile = path.join(__dirname, '../src/client-operations.cjs'); const operationModule = { exports: {} }; vm.runInNewContext(fs.readFileSync(operationFile, 'utf8'), { ...sandbox, module: operationModule, exports: operationModule.exports }, { filename: operationFile }); return operationModule.exports; } throw new Error(`unexpected require: ${id}`); },
     ...globals,
   };
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), sandbox, { filename });

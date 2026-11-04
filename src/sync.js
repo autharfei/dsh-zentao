@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_SETTINGS, validateSettings, publicSettings } from './config.js';
+import { normalizeItem } from './zentao.js';
 
 const keyOf = item => `${item.kind}:${item.id}`;
 const initialScope = () => ({ baseline: null, tasks: [], bugs: [], notifications: [], lastSuccessAt: null });
 export function createService({ client, store, pet, clock = () => new Date(), connectionFile = '', connectionError = null }) {
   let inFlight = null; let stopped = false; let timer = null; let shutdown = null; let delivery = null; let bubbleUntil = 0;
-  let deliveryAbort = new AbortController();
+  let deliveryAbort = new AbortController(); let mutationRevision = 0; const mutations = new Map();
   const pause = (ms, signal) => new Promise(resolve => {
     const finish = () => { clearTimeout(timeout); signal.removeEventListener('abort', finish); resolve(); };
     const timeout = setTimeout(finish, ms); timeout.unref?.();
@@ -18,7 +19,7 @@ export function createService({ client, store, pet, clock = () => new Date(), co
   const settings = () => ({ ...DEFAULT_SETTINGS, ...store.state.settings });
   const scope = () => store.state.scopes[scopeKey] || initialScope();
   const now = () => clock().toISOString();
-  const overview = () => ({ tasks: scope().tasks, bugs: scope().bugs, notifications: [...scope().notifications].reverse(),
+  const overview = () => ({ scopeKey, tasks: scope().tasks, bugs: scope().bugs, notifications: [...scope().notifications].reverse(),
     status: { ...status, lastSuccessAt: scope().lastSuccessAt }, settings: publicSettings(settings(), connectionFile, Boolean(client)), account: client?.account || '', baseUrl: client?.baseUrl || '' });
   function deliver() {
     if (delivery || stopped || !pet || !settings().petEnabled || !settings().notificationsEnabled) return;
@@ -49,8 +50,14 @@ export function createService({ client, store, pet, clock = () => new Date(), co
     status.syncing = true; status.lastAttemptAt = now();
     inFlight = (async () => {
       if (!client) throw new Error(connectionError || '尚未配置禅道连接');
-      const snapshot = await client.snapshot(); if (stopped) return overview();
+      const scanRevision = mutationRevision; const snapshot = await client.snapshot(); if (stopped) return overview();
       await store.update(state => {
+        // A scan that began before a successful write must not restore old rows.
+        for (const kind of ['task', 'bug']) {
+          const key = kind === 'task' ? 'tasks' : 'bugs'; const rows = new Map(snapshot[key].map(item => [item.id, item]));
+          for (const entry of mutations.values()) if (entry.revision > scanRevision && entry.item.kind === kind) rows.set(entry.item.id, entry.item);
+          snapshot[key] = [...rows.values()];
+        }
         const current = state.scopes[scopeKey] || initialScope(); const baseline = { ...(current.baseline || {}) };
         const first = current.baseline === null; const stamp = now();
         for (const item of [...snapshot.tasks, ...snapshot.bugs]) {
@@ -68,6 +75,7 @@ export function createService({ client, store, pet, clock = () => new Date(), co
         current.baseline = baseline; current.tasks = snapshot.tasks; current.bugs = snapshot.bugs; current.lastSuccessAt = stamp;
         state.scopes[scopeKey] = current;
       }, commitGuard);
+      for (const [key, entry] of mutations) if (entry.revision <= scanRevision) mutations.delete(key);
       status.error = null; deliver(); return overview();
     })().catch(error => { if (!stopped) status.error = error.message; throw error; }).finally(() => { status.syncing = false; inFlight = null; }).then(() => overview());
     return inFlight;
@@ -77,7 +85,22 @@ export function createService({ client, store, pet, clock = () => new Date(), co
     clearTimeout(timer); const delay = settings().pollSeconds * 1000; status.nextSyncAt = new Date(clock().getTime() + delay).toISOString();
     timer = setTimeout(async () => { try { await refresh(); } catch {} finally { schedule(); } }, delay); timer.unref?.();
   }
-  const service = { overview, refresh, settings: () => overview().settings,
+  const service = { overview, refresh,
+    async refreshAfterMutation() { if (inFlight) await inFlight.catch(() => {}); return refresh(); },
+    async applyMutation(kind, raw) {
+      if (stopped) throw new Error('插件已卸载');
+      const key = kind === 'task' ? 'tasks' : 'bugs'; const previous = scope()[key].find(item => item.id === Number(raw.id));
+      const item = normalizeItem(kind, raw, previous || {}); const revision = ++mutationRevision;
+      mutations.set(keyOf(item), { revision, item });
+      await store.update(state => {
+        const current = state.scopes[scopeKey] || initialScope(); const index = current[key].findIndex(row => row.id === item.id);
+        if (index < 0) current[key].push(item); else current[key][index] = item;
+        if (current.baseline) current.baseline[keyOf(item)] = { assignedTo: item.assignedTo.account, assignedDate: item.assignedDate };
+        state.scopes[scopeKey] = current;
+      }, commitGuard);
+      return overview();
+    },
+    settings: () => overview().settings,
     async markRead(ids) { if (stopped) throw new Error('插件已卸载'); const selected = ids === 'all' ? null : new Set(ids); await store.update(state => { for (const notice of state.scopes[scopeKey]?.notifications || []) if (!selected || selected.has(notice.id)) notice.read = true; }, commitGuard); return overview(); },
     async updateSettings(patch) {
       if (stopped) throw new Error('插件已卸载'); const next = validateSettings(patch);

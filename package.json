@@ -1,6 +1,6 @@
 {
   "name": "dsh-zentao",
-  "version": "0.1.5",
+  "version": "0.1.8",
   "description": "禅道任务与 Bug 工作台：列表详情、持久未读提醒及 dsh-pet 桌宠通知。",
   "type": "module",
   "main": "./lib/index.js",

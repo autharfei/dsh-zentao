@@ -90,13 +90,16 @@ test.before(async () => {
   const hostCss = cssLiteral(layout, 'css') + cssLiteral(theme, 'base_css_default') + cssLiteral(theme, 'design_platform_css_default');
   const client = fs.readFileSync(path.join(__dirname, '../src/client.cjs'), 'utf8');
   const model = fs.readFileSync(path.join(__dirname, '../src/client-model.cjs'), 'utf8');
+  const operations = fs.readFileSync(path.join(__dirname, '../src/client-operations.cjs'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '../src/client.css'), 'utf8');
   await evaluate(`(() => {
     const style = document.createElement('style'); style.textContent = ${JSON.stringify(hostCss + '\nhtml,body{height:100%;margin:0}body{overflow:hidden}')} + ${JSON.stringify(styles)}; document.head.append(style);
     const skin = document.createElement('style'); skin.textContent = ${JSON.stringify(skinCss || '')}; document.head.append(skin);
     const modelModule = {exports:{}}; new Function('module', ${JSON.stringify(model)})(modelModule);
-    const clientModule = {exports:{}};
-    new Function('require','module','STYLES', ${JSON.stringify(client)})(id => id === 'react' ? __hostModules.react : modelModule.exports, clientModule, ${JSON.stringify(styles)});
+    const clientModule = {exports:{}}, operationsModule = {exports:{}};
+    const localRequire = id => { if (id === 'react') return __hostModules.react; if (id === './client-model.cjs') return modelModule.exports; if (id === './client-operations.cjs') return operationsModule.exports; throw new Error('Unexpected fixture dependency: ' + id); };
+    new Function('require','module', ${JSON.stringify(operations)})(localRequire, operationsModule);
+    new Function('require','module','STYLES', ${JSON.stringify(client)})(localRequire, clientModule, ${JSON.stringify(styles)});
     window.ZentaoClient = clientModule.exports;
     window.renderFixture = (dark = false) => {
       window.__root?.unmount();

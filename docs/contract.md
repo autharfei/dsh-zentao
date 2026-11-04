@@ -2,9 +2,11 @@
 
 所有接口均为同源 `/api/zentao` 前缀。JSON成功 `{ok:true,data:...}`，失败 `{ok:false,error:"中文可读消息"}`；HTTP错误码有效。Host不向浏览器返回密码/Token。
 
-- `GET /overview` -> `{tasks:Item[],bugs:Item[],notifications:Notice[],status:Status,settings:Settings,account,baseUrl}`。
+- `GET /overview` -> `{scopeKey,tasks:Item[],bugs:Item[],notifications:Notice[],status:Status,settings:Settings,account,baseUrl}`。
 - `POST /refresh` body `{}` -> 同overview。仅同步，不修改禅道。
 - `GET /detail?kind=task|bug&id=123` -> `{kind,id,title,status,pri,severity?,assignedTo:{account,realname},fields:{[label]:string},html:string,actions:[{id,date,actor,action,comment,history?}],files:[{id,title,url?}],url:string}`。html为原始描述HTML；前端必须使用sandbox iframe，文档强CSP禁止脚本/表单/导航，img只放行受控同源`/image?id=`。
+- `GET /operation-context?kind=task|bug&id=123&scopeKey=<overview.scopeKey>` -> `{scopeKey,version,item:Detail,actions:OperationAction[],warnings:string[]}`。必须回传打开列表时的overview.scopeKey，Host在读取前检查连接归属，防止旧列表跨连接加载同编号表单。只读取最新对象及可用用户选项；`item.actions` 仍为历史记录，`actions` 为可执行操作定义。每项含 `{id,label,enabled,reason?,mode:'native'|'external',url,description?,fields:Field[],defaults:{}}`；Field为 `{key,label,type,required?,min?,max?,step?,options?,help?,visibleWhen?}`。`scopeKey`、`version` 为不透明校验值，原样回传。
+- `POST /operation` body `{kind,id,action,values,scopeKey,version,requestId}` -> `{applied:true,kind,id,action,overview:Overview|null,warning?:string}`。仅接受动作和字段白名单；提交前再次核对最新对象版本/状态，连接切换拒绝旧表单。请求ID在当前插件进程内去重（保留最近200个已确认回执，未知回执保留至重启），业务写不自动重试。结果未知的事项继续保持scope/kind/id级提交锁；重新读取上下文会把该事项的内嵌动作转为原站入口并说明核对方式。`code:'result-unknown'` 表示应先核对真实结果，不能直接重提；`conflict` 需重读上下文。应用成功后立即更新本地行、后台同步并触发详情刷新；本地刷新失败仍报告已应用并附warning。流程与限制见操作说明。
 - `GET /image?id=123` -> 图片二进制，Host仅请求固定禅道附件端点，禁止接收任意URL。
 - `POST /read` body `{ids:string[]}` 或 `{all:true}` -> overview。Notice.id为本地字符串，非禅道ID。
 - `GET /connection` -> `{baseUrl:string,account:string,hasPassword:boolean}`。永不返回密码/Token；overview新增connection同结构。v0.1.4只读取用户通过插件保存的私有连接文件，不自动导入MCP/环境变量；首次未配置返回`{baseUrl:'',account:'',hasPassword:false}`，不发起禅道请求或启动同步计时器，Client自动显示配置表单。
@@ -15,6 +17,8 @@
 - `POST /pet-image` body `{data:string}` -> `{id:string,type:string,bytes:number,url:string}`。仅接受不超过2MiB的PNG/JPEG/GIF/WebP纯base64，图片按SHA-256内容ID保存在本机；`GET /pet-image?id=64hex`只读返回图片，用户关闭插件时本机临时桌面图片服务停止。
 - `POST /pet-test` body `{kind:'task'|'bug'}` -> `{accepted:true,warning?:string}` 或错误。使用已保存的对应动作/配图配置，手动测试不会读取未保存草稿。
 
+
+OperationAction 的id使用命令语义（start/finish/edit/assign/cancel/pause/restart/activate/close/record/confirm/resolve/toTask），不是任意状态值。`mode:'external'` 只允许打开Host生成的同站原页，不调用写接口；原站完整表单自行执行权限和状态检查。字段可见条件为 `{key,values:[]}`；隐藏字段不提交，工时标签明确本次增量或累计。端点及版本证据见 [操作能力说明](operations.md)。
 
 Item公共字段：kind:'task'|'bug'，id:number，title:string，status:string，pri:number，assignedTo:{account:string,realname:string}，assignedDate:string，openedDate:string，lastEditedDate:string，projectName:string，productName:string；任务额外estimate/consumed/left/deadline/execution/story，Bug额外severity/resolution/resolvedDate。
 
